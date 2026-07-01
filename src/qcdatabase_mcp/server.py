@@ -25,7 +25,6 @@ from typing import Any, Optional
 
 from mcp.server.fastmcp import FastMCP
 
-from . import BASE_URL
 from .auth import AuthError, login as run_login
 from .client import APIError, QCClient
 
@@ -61,7 +60,8 @@ def require_project() -> str:
 
 _NAME_KEYS = (
     "label", "name", "title", "drawing_number", "activity_description",
-    "content", "description", "code", "item_name",
+    "content", "description", "code", "item_name", "shipper_number",
+    "activity_code",
 )
 
 
@@ -131,6 +131,13 @@ def _open_file(path: str) -> tuple[str, Any, str]:
     return p.name, p.open("rb"), ctype
 
 
+def _save_bytes(save_path: str, content: bytes) -> Path:
+    out = Path(save_path).expanduser()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_bytes(content)
+    return out
+
+
 def _safe(fn):
     """Wrap a tool so library errors come back as clear text, not tracebacks.
 
@@ -194,6 +201,15 @@ def auth_status() -> str:
     else:
         lines.append("Active project: none set. Run 'set_project'.")
     return "\n".join(lines)
+
+
+@mcp.tool()
+@_safe
+def whoami() -> str:
+    """Show who the server is signed in as: your user, the organization (tenant)
+    your login is pinned to, how you authenticated, and the access (scopes) you
+    were granted. A good first call to confirm the connection is healthy."""
+    return _pretty(client().get("/api/whoami/"))
 
 
 # ===========================================================================
@@ -313,6 +329,53 @@ def list_list_items(list_id: str) -> str:
 
 @mcp.tool()
 @_safe
+def create_list_item(list_id: str, name: str, status: str = "", data: str = "") -> str:
+    """Add an entry to a controlled-vocabulary list (e.g. a new welder or material).
+    'name' is required and must not contain a pipe (|). Optionally set a status
+    (active/inactive/compliant/non-compliant) and 'data', a JSON object of the
+    list's field values."""
+    pid = require_project()
+    payload: dict[str, Any] = {"name": name}
+    if status:
+        payload["status"] = status
+    if data:
+        payload["data"] = _parse_json_arg("data", data)
+    result = client().post(f"/api/lists/projects/{pid}/{list_id}/items/create/", json=payload)
+    return f"Created list item '{name}'.\n\n{_pretty(result)}"
+
+
+@mcp.tool()
+@_safe
+def update_list_item(item_id: str, name: str = "", status: str = "", data: str = "") -> str:
+    """Update a controlled-vocabulary list entry. Supply any of name, status, and
+    'data' (a JSON object merged into the item's existing data - supplied keys
+    overwrite, untouched keys are kept). A supplied name must not contain a pipe (|)."""
+    pid = require_project()
+    payload: dict[str, Any] = {}
+    if name:
+        payload["name"] = name
+    if status:
+        payload["status"] = status
+    if data:
+        payload["data"] = _parse_json_arg("data", data)
+    if not payload:
+        return "Nothing to update. Supply a name, status, and/or data."
+    result = client().patch(f"/api/lists/projects/{pid}/items/{item_id}/", json=payload)
+    return f"List item {item_id} updated.\n\n{_pretty(result)}"
+
+
+@mcp.tool()
+@_safe
+def delete_list_item(item_id: str) -> str:
+    """Delete a controlled-vocabulary list entry. It is soft-deleted and stops
+    appearing in list reads."""
+    pid = require_project()
+    client().delete(f"/api/lists/projects/{pid}/items/{item_id}/delete/")
+    return f"List item {item_id} deleted."
+
+
+@mcp.tool()
+@_safe
 def list_map_item_schemas() -> str:
     """List the map item schemas available in this project. A schema (e.g. 'Weld')
     defines the custom fields a map item carries - you need its id to create one."""
@@ -330,6 +393,142 @@ def list_document_folders() -> str:
     pid = require_project()
     data = client().get_all(f"/api/projects/{pid}/schemas/documents/")
     return _render_list("Document folders / types:", data)
+
+
+@mcp.tool()
+@_safe
+def list_form_schemas() -> str:
+    """List the custom inspection-form schemas defined for this project. Use a
+    schema's id with 'create_form_submission' to start filling that form out."""
+    pid = require_project()
+    data = client().get_all(f"/api/projects/{pid}/schemas/forms/")
+    return _render_list("Form schemas:", data)
+
+
+# ===========================================================================
+# Jobs (work orders)
+# ===========================================================================
+@mcp.tool()
+@_safe
+def list_jobs(status: str = "", search: str = "") -> str:
+    """List the jobs (work orders) in the current project. Optionally filter by
+    status (draft/active/in_progress/review/completed/cancelled) or a search term.
+    Jobs group the test packages that make up the project's scope."""
+    pid = require_project()
+    data = client().get_all(
+        "/api/jobs/", project=pid, status=status or None, search=search or None
+    )
+    return _render_list("Jobs:", data)
+
+
+@mcp.tool()
+@_safe
+def create_job(
+    name: str,
+    code: str,
+    description: str = "",
+    status: str = "",
+    assigned_to: str = "",
+) -> str:
+    """Create a job (work order) in the current project. 'name' and 'code' are
+    required. Optionally set a description, status, and assign it to a project
+    member by their user id."""
+    pid = require_project()
+    payload: dict[str, Any] = {"project": pid, "name": name, "code": code}
+    if description:
+        payload["description"] = description
+    if status:
+        payload["status"] = status
+    if assigned_to:
+        payload["assigned_to"] = assigned_to
+    result = client().post("/api/jobs/", json=payload)
+    return f"Created job '{name}' ({code}).\n\n{_pretty(result)}"
+
+
+# ===========================================================================
+# Packages (test packages)
+# ===========================================================================
+@mcp.tool()
+@_safe
+def list_packages(job: str = "", status: str = "", package_type: str = "", search: str = "") -> str:
+    """List the test packages in the current project. Optionally filter by job id,
+    status (draft/open/in_progress/testing/completed/rejected), package_type
+    (hydro_test/pneumatic_test/weld_map/nde/turnover/custom), or a search term."""
+    pid = require_project()
+    data = client().get_all(
+        "/api/packages/",
+        project=pid,
+        job=job or None,
+        status=status or None,
+        package_type=package_type or None,
+        search=search or None,
+    )
+    return _render_list("Packages:", data)
+
+
+@mcp.tool()
+@_safe
+def create_package(
+    job: str,
+    name: str,
+    code: str,
+    package_type: str = "",
+    description: str = "",
+    test_pressure: str = "",
+    test_medium: str = "",
+    line_spec: str = "",
+    assigned_to: str = "",
+) -> str:
+    """Create a test package under a job in the current project. 'job', 'name' and
+    'code' are required. Optionally set package_type (hydro_test/pneumatic_test/
+    weld_map/nde/turnover/custom), a description, test parameters (test_pressure,
+    test_medium), a governing line_spec id, and an assignee user id."""
+    pid = require_project()
+    payload: dict[str, Any] = {"project": pid, "job": job, "name": name, "code": code}
+    if package_type:
+        payload["package_type"] = package_type
+    if description:
+        payload["description"] = description
+    if test_pressure:
+        payload["test_pressure"] = test_pressure
+    if test_medium:
+        payload["test_medium"] = test_medium
+    if line_spec:
+        payload["line_spec"] = line_spec
+    if assigned_to:
+        payload["assigned_to"] = assigned_to
+    result = client().post("/api/packages/", json=payload)
+    return f"Created package '{name}' ({code}).\n\n{_pretty(result)}"
+
+
+# ===========================================================================
+# Line specifications
+# ===========================================================================
+@mcp.tool()
+@_safe
+def list_line_specs(status: str = "", search: str = "") -> str:
+    """List the line specifications (per-line requirement sets) in the current
+    project. Optionally filter by status (active/archived) or a search term."""
+    pid = require_project()
+    data = client().get_all(
+        "/api/line-specs/", project=pid, status=status or None, search=search or None
+    )
+    return _render_list("Line specifications:", data)
+
+
+@mcp.tool()
+@_safe
+def create_line_spec(name: str, requirements: str = "", status: str = "") -> str:
+    """Create a line specification in the current project. 'name' is required;
+    optionally provide the requirements text and a status (active/archived)."""
+    pid = require_project()
+    payload: dict[str, Any] = {"project": pid, "name": name}
+    if requirements:
+        payload["requirements"] = requirements
+    if status:
+        payload["status"] = status
+    result = client().post("/api/line-specs/", json=payload)
+    return f"Created line specification '{name}'.\n\n{_pretty(result)}"
 
 
 # ===========================================================================
@@ -395,9 +594,58 @@ def set_document_extracted_data(document_id: str, extracted_data: str) -> str:
     return f"Extracted data saved on document {document_id}.\n\n{_pretty(result)}"
 
 
+@mcp.tool()
+@_safe
+def upload_document_version(document_id: str, file_path: str, do_not_extract: bool = False) -> str:
+    """Upload a new revision of an existing document. The current file and its
+    extracted data are archived as a prior version and the new file is swapped in.
+    Set do_not_extract=True to skip server-side extraction and supply your own
+    data afterwards with 'set_document_extracted_data'."""
+    pid = require_project()
+    name, fh, ctype = _open_file(file_path)
+    try:
+        data = {"do_not_extract": "true"} if do_not_extract else {}
+        result = client().upload(
+            f"/api/documents/projects/{pid}/document/{document_id}/version/",
+            files=[("file", (name, fh, ctype))],
+            data=data,
+        )
+    finally:
+        fh.close()
+    return f"Uploaded new version '{name}' of document {document_id}.\n\n{_pretty(result)}"
+
+
+@mcp.tool()
+@_safe
+def download_document(document_id: str, save_path: str) -> str:
+    """Download a document's original uploaded file to a local path."""
+    pid = require_project()
+    content = client().download(
+        f"/api/documents/projects/{pid}/document/{document_id}/export/"
+    )
+    out = _save_bytes(save_path, content)
+    return f"Saved document {document_id} to: {out} ({len(content)} bytes)."
+
+
 # ===========================================================================
 # Drawings
 # ===========================================================================
+@mcp.tool()
+@_safe
+def list_drawings(drawing_type: str = "", status: str = "", search: str = "") -> str:
+    """List the drawings in the current project (use a drawing's id when creating
+    map items on it). Optionally filter by drawing_type, status, or a search term."""
+    pid = require_project()
+    data = client().get_all(
+        "/api/drawings/",
+        project=pid,
+        drawing_type=drawing_type or None,
+        status=status or None,
+        search=search or None,
+    )
+    return _render_list("Drawings:", data)
+
+
 @mcp.tool()
 @_safe
 def upload_drawing(file_path: str, do_not_extract: bool = False) -> str:
@@ -435,6 +683,96 @@ def upload_large_format_drawing(file_path: str, do_not_extract: bool = False) ->
     finally:
         fh.close()
     return f"Uploaded large-format drawing '{name}'.\n\n{_pretty(result)}"
+
+
+@mcp.tool()
+@_safe
+def upload_drawing_to_package(package_id: str, file_path: str, do_not_extract: bool = False) -> str:
+    """Upload an isometric drawing (PDF) straight into a specific package in the
+    current project. Multi-page PDFs are split into one drawing per sheet. Set
+    do_not_extract=True to skip server-side AI extraction."""
+    pid = require_project()
+    name, fh, ctype = _open_file(file_path)
+    try:
+        data = {"do_not_extract": "true"} if do_not_extract else {}
+        result = client().upload(
+            f"/api/drawings/projects/{pid}/packages/{package_id}/upload/",
+            files=[("pdf_file", (name, fh, ctype))],
+            data=data,
+        )
+    finally:
+        fh.close()
+    return f"Uploaded drawing '{name}' into package {package_id}.\n\n{_pretty(result)}"
+
+
+@mcp.tool()
+@_safe
+def upload_drawing_version(drawing_id: str, file_path: str, do_not_extract: bool = False) -> str:
+    """Upload a new revision of an existing drawing (a single-page PDF or image).
+    The current image and its data are archived as a prior version and the new
+    file is swapped in. Set do_not_extract=True to skip server-side extraction."""
+    pid = require_project()
+    name, fh, ctype = _open_file(file_path)
+    try:
+        data = {"do_not_extract": "true"} if do_not_extract else {}
+        result = client().upload(
+            f"/api/drawings/projects/{pid}/drawing/{drawing_id}/version/",
+            files=[("file", (name, fh, ctype))],
+            data=data,
+        )
+    finally:
+        fh.close()
+    return f"Uploaded new version '{name}' of drawing {drawing_id}.\n\n{_pretty(result)}"
+
+
+@mcp.tool()
+@_safe
+def upload_large_format_drawing_version(lfd_id: str, file_path: str, do_not_extract: bool = False) -> str:
+    """Upload a new revision of an existing large-format drawing. The current file
+    and its data are archived as a prior version. Set do_not_extract=True to skip
+    server-side extraction."""
+    pid = require_project()
+    name, fh, ctype = _open_file(file_path)
+    try:
+        data = {"do_not_extract": "true"} if do_not_extract else {}
+        result = client().upload(
+            f"/api/drawings/projects/{pid}/large-format/{lfd_id}/version/",
+            files=[("file", (name, fh, ctype))],
+            data=data,
+        )
+    finally:
+        fh.close()
+    return f"Uploaded new version '{name}' of large-format drawing {lfd_id}.\n\n{_pretty(result)}"
+
+
+@mcp.tool()
+@_safe
+def export_drawing(drawing_id: str, save_path: str, variant: str = "clean", schema_id: str = "") -> str:
+    """Render a drawing to a PDF and save it locally. variant='clean' (default) is
+    the bare drawing; variant='map' overlays its map items - give a schema_id to
+    overlay only that schema's items, or omit it for the combined map of all."""
+    pid = require_project()
+    content = client().download(
+        f"/api/drawings/projects/{pid}/drawing/{drawing_id}/export/",
+        variant=variant or None,
+        schema_id=schema_id or None,
+    )
+    out = _save_bytes(save_path, content)
+    return f"Saved drawing {drawing_id} ({variant}) to: {out} ({len(content)} bytes)."
+
+
+@mcp.tool()
+@_safe
+def export_large_format_drawing(lfd_id: str, save_path: str, variant: str = "clean") -> str:
+    """Render a large-format drawing to a PDF and save it locally. variant='clean'
+    (default) is the bare drawing; variant='flagged' includes the flagged overlay."""
+    pid = require_project()
+    content = client().download(
+        f"/api/drawings/projects/{pid}/large-format/{lfd_id}/export/",
+        variant=variant or None,
+    )
+    out = _save_bytes(save_path, content)
+    return f"Saved large-format drawing {lfd_id} ({variant}) to: {out} ({len(content)} bytes)."
 
 
 # ===========================================================================
@@ -510,6 +848,36 @@ def mark_map_item_accepted(item_id: str) -> str:
     )
 
 
+@mcp.tool()
+@_safe
+def list_repair_codes() -> str:
+    """List the repair codes used when adding a repair to a map item: R (Repair),
+    C (Cut-out), A (Adjustment), SC (Scope Change), RW (Rework)."""
+    data = client().get_all("/api/mapping/items/repair-codes/")
+    if not data:
+        return "No repair codes found."
+    lines = ["Repair codes:", ""]
+    for it in data:
+        if isinstance(it, dict):
+            lines.append(f"  {it.get('code', '?')} - {it.get('label', '')}")
+        else:
+            lines.append(f"  {it}")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+@_safe
+def add_map_item_repair(item_id: str, repair_code: str) -> str:
+    """Record a repair against a map item (e.g. a weld). repair_code is one of
+    R, C, A, SC, RW (see 'list_repair_codes'). The repair is created as a child
+    item with a system-derived label like W1.R1; you cannot add a repair to a
+    repair."""
+    result = client().post(
+        f"/api/mapping/items/{item_id}/repair/", json={"repair_code": repair_code}
+    )
+    return f"Added repair '{repair_code}' to map item {item_id}.\n\n{_pretty(result)}"
+
+
 # ===========================================================================
 # Fillable PDF templates
 # ===========================================================================
@@ -538,19 +906,11 @@ def download_fillable_template(folder_id: str, save_path: str) -> str:
     """Download the blank fillable PDF for a folder to a local path so you can
     fill it in (ideally flatten it) before submitting."""
     pid = require_project()
-    c = client()
-    token = c._headers()  # noqa: SLF001 - reuse the auth header builder
-    import httpx
-
-    url = f"{BASE_URL}/api/documents/projects/{pid}/fillable-templates/{folder_id}/download/"
-    with httpx.Client(timeout=120.0, follow_redirects=True) as raw:
-        resp = raw.get(url, headers=token)
-    if not resp.is_success:
-        raise APIError(f"Download failed ({resp.status_code}).")
-    out = Path(save_path).expanduser()
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_bytes(resp.content)
-    return f"Saved blank template to: {out} ({len(resp.content)} bytes)."
+    content = client().download(
+        f"/api/documents/projects/{pid}/fillable-templates/{folder_id}/download/"
+    )
+    out = _save_bytes(save_path, content)
+    return f"Saved blank template to: {out} ({len(content)} bytes)."
 
 
 @mcp.tool()
@@ -626,6 +986,42 @@ def create_form_submission(
 
 @mcp.tool()
 @_safe
+def get_form_submission(submission_id: str) -> str:
+    """Get one inspection-form submission, including its current field data and
+    status. Use this to read a draft before filling it in further."""
+    pid = require_project()
+    return _pretty(client().get(f"/api/forms/projects/{pid}/submissions/{submission_id}/"))
+
+
+@mcp.tool()
+@_safe
+def update_form_submission(
+    submission_id: str,
+    title: str = "",
+    report_date: str = "",
+    data: str = "",
+) -> str:
+    """Fill in (update) a draft form submission's title, report_date, and/or field
+    values. 'data' is a JSON object that replaces the submission's data. Completed
+    (locked) submissions cannot be edited."""
+    pid = require_project()
+    payload: dict[str, Any] = {}
+    if title:
+        payload["title"] = title
+    if report_date:
+        payload["report_date"] = report_date
+    if data:
+        payload["data"] = _parse_json_arg("data", data)
+    if not payload:
+        return "Nothing to update. Give a title, report_date, and/or data."
+    result = client().patch(
+        f"/api/forms/projects/{pid}/submissions/{submission_id}/", json=payload
+    )
+    return f"Form submission {submission_id} updated.\n\n{_pretty(result)}"
+
+
+@mcp.tool()
+@_safe
 def complete_form_submission(submission_id: str) -> str:
     """Mark a form submission complete. Completed forms are evidence that can
     satisfy reference requests. This locks the submission - only do it when the
@@ -691,18 +1087,124 @@ def list_itp_line_items(
     package: str = "",
     completed: Optional[bool] = None,
     accepted: Optional[bool] = None,
+    assigned_to: str = "",
 ) -> str:
     """List ITP (Inspection & Test Plan) line items in the current project -
-    the required inspection/test steps. Optionally filter by package id, and by
-    completed / accepted (true or false)."""
+    the required inspection/test steps. Optionally filter by package id, by
+    completed / accepted (true or false), and by an assignee user id."""
     pid = require_project()
     data = client().get_all(
         f"/api/packages/projects/{pid}/itp-line-items/",
         package=package or None,
         completed=completed,
         accepted=accepted,
+        assigned_to=assigned_to or None,
     )
     return _render_list("ITP line items:", data)
+
+
+@mcp.tool()
+@_safe
+def get_itp_line_item(item_id: str) -> str:
+    """Get one ITP line item, including its activity, acceptance criteria, evidence
+    requirements, and completed/accepted state."""
+    pid = require_project()
+    return _pretty(client().get(f"/api/packages/projects/{pid}/itp-line-items/{item_id}/"))
+
+
+@mcp.tool()
+@_safe
+def create_itp_line_item(
+    package: str,
+    activity_description: str = "",
+    activity_code: str = "",
+    inspection_frequency: str = "",
+    acceptance_criteria: str = "",
+    governing_standard: str = "",
+    assigned_to: str = "",
+    due_date: str = "",
+    expected_document_type: str = "",
+    expected_custom_form: str = "",
+    photo_required: Optional[bool] = None,
+) -> str:
+    """Create an ITP line item under a package (the package id is required). You can
+    set the activity, inspection_frequency, acceptance_criteria, governing_standard,
+    an assignee and due_date, and the evidence requirements: expected_document_type
+    (a document folder id), expected_custom_form (a form schema id), and
+    photo_required."""
+    pid = require_project()
+    payload: dict[str, Any] = {"package": package}
+    if activity_description:
+        payload["activity_description"] = activity_description
+    if activity_code:
+        payload["activity_code"] = activity_code
+    if inspection_frequency:
+        payload["inspection_frequency"] = inspection_frequency
+    if acceptance_criteria:
+        payload["acceptance_criteria"] = acceptance_criteria
+    if governing_standard:
+        payload["governing_standard"] = governing_standard
+    if assigned_to:
+        payload["assigned_to"] = assigned_to
+    if due_date:
+        payload["due_date"] = due_date
+    if expected_document_type:
+        payload["expected_document_type"] = expected_document_type
+    if expected_custom_form:
+        payload["expected_custom_form"] = expected_custom_form
+    if photo_required is not None:
+        payload["photo_required"] = photo_required
+    result = client().post(f"/api/packages/projects/{pid}/itp-line-items/", json=payload)
+    return f"Created ITP line item.\n\n{_pretty(result)}"
+
+
+@mcp.tool()
+@_safe
+def update_itp_line_item(
+    item_id: str,
+    activity_description: str = "",
+    activity_code: str = "",
+    inspection_frequency: str = "",
+    acceptance_criteria: str = "",
+    governing_standard: str = "",
+    assigned_to: str = "",
+    due_date: str = "",
+    expected_document_type: str = "",
+    expected_custom_form: str = "",
+    photo_required: Optional[bool] = None,
+) -> str:
+    """Update an ITP line item's editable fields (activity, assignee, due date, and
+    the evidence requirements expected_document_type, expected_custom_form, and
+    photo_required). Only the fields you supply are changed. This does not mark it
+    complete or accepted - use the dedicated buy-off tools for that."""
+    pid = require_project()
+    payload: dict[str, Any] = {}
+    if activity_description:
+        payload["activity_description"] = activity_description
+    if activity_code:
+        payload["activity_code"] = activity_code
+    if inspection_frequency:
+        payload["inspection_frequency"] = inspection_frequency
+    if acceptance_criteria:
+        payload["acceptance_criteria"] = acceptance_criteria
+    if governing_standard:
+        payload["governing_standard"] = governing_standard
+    if assigned_to:
+        payload["assigned_to"] = assigned_to
+    if due_date:
+        payload["due_date"] = due_date
+    if expected_document_type:
+        payload["expected_document_type"] = expected_document_type
+    if expected_custom_form:
+        payload["expected_custom_form"] = expected_custom_form
+    if photo_required is not None:
+        payload["photo_required"] = photo_required
+    if not payload:
+        return "Nothing to update. Supply at least one field to change."
+    result = client().patch(
+        f"/api/packages/projects/{pid}/itp-line-items/{item_id}/", json=payload
+    )
+    return f"ITP line item {item_id} updated.\n\n{_pretty(result)}"
 
 
 @mcp.tool()
@@ -731,9 +1233,20 @@ def mark_itp_accepted(item_id: str) -> str:
 # ===========================================================================
 @mcp.tool()
 @_safe
+def list_photos(object_type: str, object_id: str) -> str:
+    """List the photos attached to an object. object_type is one of drawing,
+    formsubmission, itplineitem, job, listitem, mapitem, package, shipperlineitem."""
+    pid = require_project()
+    data = client().get_all(f"/api/photos/projects/{pid}/{object_type}/{object_id}/")
+    return _render_list(f"Photos on {object_type} {object_id}:", data)
+
+
+@mcp.tool()
+@_safe
 def attach_photo(object_type: str, object_id: str, file_path: str, caption: str = "") -> str:
-    """Attach a photo to an object (for example object_type='map_item' with that
-    item's id). Optionally add a caption."""
+    """Attach a photo to an object. object_type is one of drawing, formsubmission,
+    itplineitem, job, listitem, mapitem, package, shipperlineitem (for example
+    object_type='mapitem' with that item's id). Optionally add a caption."""
     pid = require_project()
     name, fh, ctype = _open_file(file_path)
     try:
@@ -879,6 +1392,61 @@ def turnover_report() -> str:
         lines += ["", "Use 'list_reference_requests' to see the full punch list and "
                   "'create_reference' to close items out as you provide evidence."]
     return "\n".join(lines)
+
+
+# ===========================================================================
+# Shippers (received material - read only)
+# ===========================================================================
+@mcp.tool()
+@_safe
+def list_shippers(search: str = "") -> str:
+    """List the shippers (incoming shipments / receiving records) in the current
+    project. Optionally filter by a search term."""
+    pid = require_project()
+    data = client().get_all(f"/api/shippers/projects/{pid}/", search=search or None)
+    return _render_list("Shippers:", data)
+
+
+@mcp.tool()
+@_safe
+def list_shipper_line_items(shipper_id: str, search: str = "") -> str:
+    """List the line items (received materials, with quantities and heat numbers)
+    on one shipper. Optionally filter by a search term."""
+    pid = require_project()
+    data = client().get_all(
+        f"/api/shippers/projects/{pid}/{shipper_id}/line-items/", search=search or None
+    )
+    return _render_list(f"Line items on shipper {shipper_id}:", data)
+
+
+# ===========================================================================
+# QR codes
+# ===========================================================================
+@mcp.tool()
+@_safe
+def generate_qr_code(url: str, save_path: str = "") -> str:
+    """Generate a QR code (and short URL) for an internal QC Database app path,
+    e.g. url='/projects/<id>/'. Only internal app paths are allowed. Returns the
+    short URL; if save_path is given, also decodes and saves the QR image there."""
+    proj = client().store.get_active_project() or {}
+    payload: dict[str, Any] = {"url": url}
+    if proj.get("id"):
+        payload["project_id"] = proj["id"]
+    result = client().post("/api/qr/generate/", json=payload)
+
+    saved = ""
+    if save_path and isinstance(result, dict):
+        img = result.get("qr_image_base64") or result.get("qr_image")
+        if isinstance(img, str) and img:
+            import base64
+
+            b64 = img.split(",", 1)[1] if img.startswith("data:") else img
+            try:
+                out = _save_bytes(save_path, base64.b64decode(b64))
+                saved = f"\nSaved QR image to: {out}."
+            except (ValueError, TypeError):
+                saved = "\n(Could not decode the QR image from the response.)"
+    return f"QR code generated.{saved}\n\n{_pretty(result)}"
 
 
 def run() -> None:

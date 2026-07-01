@@ -138,6 +138,32 @@ class QCClient:
     def patch(self, path: str, json: Any | None = None, **params: Any) -> Any:
         return self.request("PATCH", path, json=json, params=params)
 
+    def delete(self, path: str, **params: Any) -> Any:
+        return self.request("DELETE", path, params=params)
+
+    def download(self, path: str, **params: Any) -> bytes:
+        """GET a binary file (a rendered PDF, an original upload) and return its
+        raw bytes. Uses the same auth + one-shot-refresh handling as request(),
+        but does not try to parse the body as JSON."""
+        clean_params = {k: v for k, v in params.items() if v is not None}
+
+        def _send() -> httpx.Response:
+            return self._http.get(path, params=clean_params or None, headers=self._headers())
+
+        try:
+            resp = _send()
+            if resp.status_code == 401:
+                refresh(self.store, self.port)
+                resp = _send()
+        except httpx.HTTPError as exc:
+            raise APIError(f"Could not reach QC Database: {exc}") from exc
+
+        if not resp.is_success:
+            # _handle turns the documented error statuses into clear messages;
+            # on any non-success status it always raises.
+            self._handle(resp)
+        return resp.content
+
     def upload(
         self,
         path: str,
@@ -165,8 +191,9 @@ class QCClient:
                     break
                 page += 1
                 continue
-            # Non-paginated custom shapes (e.g. {"items": [...]}, {"notes": [...]}).
-            for key in ("items", "notes", "data"):
+            # Non-paginated custom shapes (e.g. {"items": [...]}, {"notes": [...]},
+            # {"schemas": [...]}, {"photos": [...]}).
+            for key in ("items", "notes", "data", "schemas", "photos"):
                 if key in payload and isinstance(payload[key], list):
                     return payload[key]
             return [payload]

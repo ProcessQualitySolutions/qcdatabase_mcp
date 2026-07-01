@@ -176,23 +176,36 @@ Then ask Claude to **"connect to QC Database"** to sign in — see below.
 
 ## What it can do (tool groups)
 
-- **Session:** `login`, `logout`, `auth_status`
+- **Session:** `login`, `logout`, `auth_status`, `whoami`
 - **Find your way around:** `list_tenants`, `list_projects`, `set_project`,
   `get_active_project`, `list_project_members`, `list_lists`, `list_list_items`,
-  `list_map_item_schemas`, `list_document_folders`
-- **Upload records:** `upload_document`, `upload_drawing`,
-  `upload_large_format_drawing`, `attach_photo`
+  `list_map_item_schemas`, `list_document_folders`, `list_form_schemas`
+- **Controlled-vocabulary lists:** `create_list_item`, `update_list_item`,
+  `delete_list_item`
+- **Jobs & packages:** `list_jobs`, `create_job`, `list_packages`,
+  `create_package`, `list_line_specs`, `create_line_spec`
+- **Upload records:** `upload_document`, `upload_document_version`,
+  `download_document`, `upload_drawing`, `upload_large_format_drawing`,
+  `upload_drawing_to_package`, `upload_drawing_version`,
+  `upload_large_format_drawing_version`, `attach_photo`
+- **Drawings:** `list_drawings`, `export_drawing`, `export_large_format_drawing`
 - **Fillable PDF forms:** `list_fillable_templates`, `get_fillable_template`,
   `download_fillable_template`, `submit_fillable_template`
 - **Structured data:** `get_document`, `set_document_extracted_data`,
   `list_documents`, `list_map_items`, `create_map_item`
+- **Repairs:** `list_repair_codes`, `add_map_item_repair`
 - **Inspection forms & notes:** `list_form_submissions`, `create_form_submission`,
-  `complete_form_submission`, `create_note`, `list_notes`, `resolve_note`
-- **Sign-offs (your call):** `mark_map_item_complete`, `mark_map_item_accepted`,
-  `list_itp_line_items`, `mark_itp_complete`, `mark_itp_accepted`
+  `get_form_submission`, `update_form_submission`, `complete_form_submission`,
+  `create_note`, `list_notes`, `resolve_note`
+- **Photos:** `list_photos`, `attach_photo`
+- **ITP & sign-offs (your call):** `list_itp_line_items`, `get_itp_line_item`,
+  `create_itp_line_item`, `update_itp_line_item`, `mark_map_item_complete`,
+  `mark_map_item_accepted`, `mark_itp_complete`, `mark_itp_accepted`
 - **Turnover (the important part):** `list_reference_requests`,
   `create_reference_request`, `list_references`, `create_reference`,
   `turnover_report`
+- **Receiving:** `list_shippers`, `list_shipper_line_items`
+- **Utilities:** `generate_qr_code`
 
 ---
 
