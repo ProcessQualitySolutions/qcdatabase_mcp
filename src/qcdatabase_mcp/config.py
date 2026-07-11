@@ -19,11 +19,15 @@ APP_DIR_NAME = "qcdatabase-mcp"
 STORE_FILENAME = "store.json"
 
 
-def config_dir() -> Path:
-    """Return (and create) the per-user directory we store state in.
+def config_dir(create: bool = True) -> Path:
+    """Return the per-user directory we store state in.
 
     Honours ``QCDB_CONFIG_DIR`` for advanced users / testing, otherwise uses the
-    conventional location for the platform.
+    conventional location for the platform. This directory is intentionally
+    outside any project/repository checkout so tokens can never be committed.
+
+    Pass ``create=False`` to only compute the path (e.g. for a safety check that
+    must not have the side effect of creating the directory).
     """
     override = os.environ.get("QCDB_CONFIG_DIR")
     if override:
@@ -37,7 +41,8 @@ def config_dir() -> Path:
         root = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
         base = Path(root) / APP_DIR_NAME
 
-    base.mkdir(parents=True, exist_ok=True)
+    if create:
+        base.mkdir(parents=True, exist_ok=True)
     return base
 
 

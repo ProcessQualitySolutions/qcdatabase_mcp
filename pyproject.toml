@@ -19,7 +19,20 @@ classifiers = [
 dependencies = [
     "mcp>=1.10",
     "httpx>=0.27",
+    # Used only for the optional --http (Streamable HTTP) transport; ships with mcp.
+    "uvicorn>=0.30",
 ]
+
+[project.optional-dependencies]
+# Only needed to share hosted session state across replicas (QCDB_MCP_REDIS_URL).
+# The default in-memory store needs nothing extra.
+redis = ["redis>=5"]
+# Test suite.
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
 
 [project.urls]
 Homepage = "https://qcdatabase.ai"

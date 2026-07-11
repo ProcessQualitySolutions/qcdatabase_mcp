@@ -9,8 +9,9 @@ It runs **on your own computer**. Your AI assistant talks to it; it talks to
 [QCDatabase.AI](https://qcdatabase.ai) on your behalf, using your own login.
 
 Built on the official [Model Context Protocol](https://modelcontextprotocol.io)
-Python library and the public
-[QC Database MCP specification](https://qcdatabase.ai/mcp_server_spec.md).
+Python library and the QC Database MCP specification — published at
+[qcdatabase.ai/mcp_server_spec.md](https://qcdatabase.ai/mcp_server_spec.md) and
+kept in this repo as [`mcp_server_spec.md`](mcp_server_spec.md).
 
 ---
 
@@ -23,6 +24,10 @@ Once it's connected, you can talk to it in plain language. For example:
 - *"Upload this MTR to the Mill Test Reports folder."*
 - *"What's still missing for turnover on this project?"*
 - *"Show me the open reference requests assigned to me."*
+- *"Find welds that failed X-ray near line 12."* → meaning-based (semantic) search
+  across your project data, ranked by relevance.
+- *"How do I create a test package in QC Database?"* → answers from the built-in
+  QC Database user manual, so you can learn the app without leaving your assistant.
 - *"Attach this photo to that weld."*
 - *"Mark this inspection complete."* (it will remind you that the sign-off is
   recorded under your name — that's your call, not the AI's).
@@ -188,11 +193,16 @@ Then ask Claude to **"connect to QC Database"** to sign in — see below.
   `download_document`, `upload_drawing`, `upload_large_format_drawing`,
   `upload_drawing_to_package`, `upload_drawing_version`,
   `upload_large_format_drawing_version`, `attach_photo`
-- **Drawings:** `list_drawings`, `export_drawing`, `export_large_format_drawing`
+- **Drawings:** `list_drawings`, `get_drawing` (incl. pixel width/height — the
+  HTML5-canvas coordinate space for map items), `export_drawing`,
+  `export_large_format_drawing`
 - **Fillable PDF forms:** `list_fillable_templates`, `get_fillable_template`,
   `download_fillable_template`, `submit_fillable_template`
 - **Structured data:** `get_document`, `set_document_extracted_data`,
-  `list_documents`, `list_map_items`, `create_map_item`
+  `list_documents`, `list_map_items`, `get_map_item`, `create_map_item`
+  (place welds/flanges by pixel coordinates), `bulk_create_map_items`,
+  `bulk_update_map_items` (batch up to 500 items on one drawing/schema). **Always
+  call `list_map_item_schemas` first** — see the CAD/PCF/.weldb note below
 - **Repairs:** `list_repair_codes`, `add_map_item_repair`
 - **Inspection forms & notes:** `list_form_submissions`, `create_form_submission`,
   `get_form_submission`, `update_form_submission`, `complete_form_submission`,
@@ -201,11 +211,53 @@ Then ask Claude to **"connect to QC Database"** to sign in — see below.
 - **ITP & sign-offs (your call):** `list_itp_line_items`, `get_itp_line_item`,
   `create_itp_line_item`, `update_itp_line_item`, `mark_map_item_complete`,
   `mark_map_item_accepted`, `mark_itp_complete`, `mark_itp_accepted`
+- **Quality-hold locks (witness/hold points — the user's call):** `list_lock_types`
+  (read only), `list_locks`, `get_lock`, `add_lock` (place a hold point — fit-up,
+  tack-up, weld-cleanliness, FME, final-closure, boiler-tube FME sponge-in/sponge-out,
+  etc. — on a map item or ITP line item so it can't be turned in until inspected),
+  `unlock_lock`, `assign_lock`, `delete_lock`. A lock is a construction quality gate,
+  **not** a security control; place or clear one only at the explicit request of its
+  owner/author or an authorized inspector. **Creating or editing lock *types*** (the
+  named hold definitions, and who may place/clear each) is intentionally **not**
+  exposed here — that permission-sensitive setup is done in the web app's Project
+  Admin, and the assistant will point you there
 - **Turnover (the important part):** `list_reference_requests`,
   `create_reference_request`, `list_references`, `create_reference`,
   `turnover_report`
 - **Receiving:** `list_shippers`, `list_shipper_line_items`
+- **Semantic search (meaning-based, ranked):** `semantic_search` — natural-language
+  search across the project's documents, drawings, large-format drawings, jobs,
+  packages, list items, map items, form submissions, notes, and shippers
+- **How QC Database works:** `search_user_manual` (ask "how do I…?" questions and
+  read the product help articles), `list_user_manual` (browse the help contents)
 - **Utilities:** `generate_qr_code`
+
+---
+
+## A companion to CAD, PCF, and .weldb systems
+
+This server is a natural partner to the systems that already describe your
+geometry — CAD/CAE exports, **PCF** piping files, and **.weldb** boilermaker
+replacement-panel files. Those sources carry most of what a good map item needs,
+so the assistant can turn them into accurate weld maps — **if** it follows two
+habits:
+
+1. **Fetch the schema first.** Always call `list_map_item_schemas` *before*
+   `create_map_item` / `bulk_create_map_items`. That picks the right schema and
+   reveals its exact fields, so source values land where they belong instead of
+   being guessed or free-texted:
+   - **PCF** (piping) files carry most of what a pipe weld needs — **joint type,
+     material, weight/sch**.
+   - **.weldb** files carry **material, tube wall thickness**, and the weld's
+     **rectangular position** on the drawing — enough to build a weld map
+     automatically.
+2. **Match the source's geometry — point vs. rectangular welds.** This is the big
+   data-quality lever. A **PCF** pipe weld is a single **point** weld (one x/y). A
+   **.weldb** weld has a **rectangular** position — give the second point
+   (`x_position_2`/`y_position_2`) as the opposite corner so the extent is
+   preserved. Collapsing a rectangular weld to a bare point (or spreading a point
+   weld into a box) silently corrupts the map. Fetching the schema up front is
+   what makes this distinction obvious before any items are placed.
 
 ---
 
@@ -237,6 +289,29 @@ Your login is stored on your own computer in a per-user folder:
 
 Run the `logout` tool (or delete that file) to forget the login.
 
+### Filesystem safety (design invariant)
+
+This is a hard rule the server must always uphold — for its own safety and for
+anyone contributing to this open-source repo:
+
+- **The server never modifies its own files.** No tool can read from or write to
+  the server's whole installation — its own source, its dependencies
+  (`site-packages`), the virtualenv, or (from a checkout) the repo root — whatever
+  path it is given, so the assistant can never edit the server's or a
+  dependency's code (no self-modification). Downloads also refuse to **overwrite
+  an existing file**; choose a new path.
+- **The server never touches its credential store beyond the token flow.** No
+  tool can read or write the per-user config directory, so a token can never be
+  exfiltrated or overwritten through a tool, and it can never be committed to the
+  repo (it lives outside any checkout; `store.json` is also `.gitignore`d).
+- **The only local files a tool ever touches are the user's own documents**, and
+  only in **stdio** mode — the upload tools read a file you point them at, and the
+  download/export tools write to a path you choose. In **hosted** mode the server
+  refuses all local filesystem access, because the disk is the server's, not
+  yours (uploads/downloads there would need a client-side file channel instead).
+
+These rules are enforced in code by `_guard_local_path` in `server.py`.
+
 ---
 
 ## Troubleshooting
@@ -253,6 +328,11 @@ Run the `logout` tool (or delete that file) to forget the login.
 - **"Not logged in."** Ask the assistant to *connect to QC Database* and finish
   the sign-in in your browser.
 - **"No project is set."** Ask it to *work on* a project, or to *list projects*.
+- **A newer feature says "Access denied (403)" (e.g. the user manual, or the
+  quality-hold locks).** If you first signed in with an older version, your saved
+  app registration predates that feature's permission. Delete your `store.json`
+  (see **Privacy & safety** for its location) and sign in again — that
+  re-registers the app with the current permissions.
 - **The browser didn't open during login.** The assistant will show you a link —
   open it manually to finish, then sign in again.
 - **The sign-in page can't connect / port already in use.** The login uses a
@@ -267,24 +347,109 @@ Run the `logout` tool (or delete that file) to forget the login.
 ## For developers
 
 ```
-pip install -e .          # editable install
-python -m qcdatabase_mcp  # run the stdio server directly
+pip install -e .            # editable install
+python -m qcdatabase_mcp    # run the stdio server directly
+
+pip install -e '.[dev]'     # editable install + test deps
+pytest                      # run the test suite
 ```
 
 Layout:
 
 ```
 src/qcdatabase_mcp/
-  __main__.py   # entry point (stdio server)
-  server.py     # FastMCP server + all tools
-  client.py     # HTTP client: bearer auth, auto-refresh, errors, pagination
-  auth.py       # OAuth2 (PKCE + dynamic client registration) login & refresh
-  config.py     # local token / project storage
+  __main__.py   # entry point + CLI (chooses stdio vs. hosted HTTP)
+  server.py     # FastMCP server + all tools + local filesystem guard
+  hosted.py     # multi-user hosting: OAuth resource server, token verify, sessions
+  client.py     # HTTP client: bearer auth, auto-refresh, errors, pagination, path safety
+  auth.py       # OAuth2 (PKCE + dynamic client registration) login & refresh (stdio)
+  config.py     # local token / project storage (stdio)
+tests/
+  test_security.py  # guard, token verifier, path safety, pagination, refresh, ...
+mcp_server_spec.md  # the API + behaviour spec this server implements
+CLAUDE.md           # contributor invariants (filesystem safety, credential handling)
 ```
 
-Environment variables:
+Environment variables (stdio mode):
 
 - `QCDB_CALLBACK_PORT` — local OAuth callback port (default `8765`).
 - `QCDB_CONFIG_DIR` — override where tokens/settings are stored.
+
+### Hosting it for many users (`mcp.qcdatabase.ai`)
+
+By default the server speaks MCP over **stdio** — one local user, sign-in via the
+`login` tool. Pass `--http` to run the **multi-user hosted** server instead, which
+serves the **Streamable HTTP** transport at `/mcp`:
+
+```
+qcdatabase-mcp --http                              # loopback dev
+QCDB_MCP_RESOURCE_URL=https://mcp.qcdatabase.ai \
+  qcdatabase-mcp --http --host 0.0.0.0 --port 8000 # production, behind a TLS proxy
+```
+
+In hosted mode the server is an **OAuth 2.0 resource server** (per the MCP
+authorization spec) — there are no shared secrets and nothing is stored on disk:
+
+- Each MCP client signs its **own user** in against QCDatabase.AI (discovered from
+  the `/.well-known/oauth-protected-resource` document this server publishes) and
+  sends that user's access token as `Authorization: Bearer …` on every request.
+- The server **verifies** the token against `/api/whoami/`, identifies the user,
+  and acts as them. Unauthenticated requests get `401` with a `WWW-Authenticate`
+  header pointing clients at the authorization server, so sign-in is automatic.
+- **Per-user session state** (the active project) is kept in memory keyed by a
+  globally-unique identity (tenant + user id, never the raw token), so many people
+  share one deployment without ever seeing each other's work. Verification fails
+  closed — a token that doesn't resolve to a user is rejected. (State resets on
+  restart — users just re-run `set_project`.)
+- **DNS-rebinding protection** validates the `Host`/`Origin` of every request
+  (forged `Host` → `421`, forged `Origin` → `403`).
+
+The `login` / `logout` tools become no-ops in hosted mode (sign-in is the client's
+job); everything else works identically to stdio.
+
+Hosted-mode configuration (flags override env):
+
+- `QCDB_MCP_HTTP=1` — same as `--http`.
+- `--host` / `QCDB_MCP_HOST`, `--port` / `QCDB_MCP_PORT` — bind (default
+  `127.0.0.1:8000`).
+- `--resource-url` / `QCDB_MCP_RESOURCE_URL` — this server's public URL and OAuth
+  resource id; **required** when binding a non-loopback host.
+- `--issuer-url` / `QCDB_MCP_ISSUER_URL` — the OAuth authorization server (default
+  `https://qcdatabase.ai`).
+- `QCDB_MCP_ALLOWED_HOSTS` / `QCDB_MCP_ALLOWED_ORIGINS` — extra allow-list entries
+  (comma-separated), e.g. when fronted by additional hostnames.
+- `QCDB_MCP_TOKEN_CACHE_TTL` — seconds a verified token is trusted before
+  re-checking `/api/whoami/` (default `60`). This is also the window in which a
+  token revoked upstream keeps working here; lower it to shrink that window.
+- `QCDB_MCP_TOKEN_NEG_CACHE_TTL` — seconds a *failed* verification is remembered
+  (default `5`), which blunts garbage-token amplification against the API.
+
+**TLS.** Terminate TLS at a reverse proxy in front of the server (never expose
+plain HTTP publicly) and forward the real `Host` header.
+
+**Resource indicator (kept open).** This server accepts any valid QCDatabase-
+issued token and takes its resource id from `QCDB_MCP_RESOURCE_URL`, so anyone can
+fork it and host on their own domain without special AS configuration. For strict
+RFC 8707 audience binding, an operator *may* configure their authorization server
+to issue tokens bound to their MCP URL — but it is not required.
+
+**Scaling across replicas.** The only shared state is each user's pinned project —
+small, non-secret, and disposable (lost pins just mean re-running `set_project`).
+Pick whichever fits your deployment:
+
+- **Single instance (default).** In-memory store, nothing to run. Best for most
+  self-hosters.
+- **Sticky sessions.** Several replicas behind a load balancer that routes each
+  user to the same replica; still in-memory, but a replica restart drops its
+  users' pins.
+- **Shared store (Redis).** Set `QCDB_MCP_REDIS_URL` and install the extra
+  (`pip install 'qcdatabase-mcp[redis]'`). All replicas share state and it
+  survives restarts. Pins expire after `QCDB_MCP_SESSION_TTL` seconds idle
+  (default 8h). To plug in a different backend, implement the two-method store in
+  `hosted.py` (`get_active_project` / `set_active_project`) and return it from
+  `build_session_store`.
+
+(The token-verification cache is intentionally per-replica — each rebuilds it from
+`/api/whoami/`, so it needs no sharing.)
 
 Licensed under the MIT License (see `LICENSE`).

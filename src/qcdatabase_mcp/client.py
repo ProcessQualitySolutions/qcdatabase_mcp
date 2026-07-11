@@ -9,7 +9,10 @@ back.
 from __future__ import annotations
 
 import os
+import re
+import sys
 from typing import Any, BinaryIO
+from urllib.parse import parse_qsl, urlsplit
 
 import httpx
 
@@ -20,6 +23,49 @@ from .config import Store
 
 class APIError(RuntimeError):
     """A request reached the server but came back with an error status."""
+
+
+# Ids are f-string-interpolated into request paths throughout the tool layer, and
+# some of those ids echo other project members' content (an indirect prompt-
+# injection channel). A well-formed API path is a run of url-safe segments; this
+# guard rejects anything else (path traversal, an injected query/fragment, or an
+# empty segment from a missing id like ``/api/documents//``) before it is sent -
+# defense in depth so a crafted id can never re-target the request off the tool
+# surface. Query parameters travel via ``params=``, never in the path string.
+_SAFE_SEGMENT = re.compile(r"[A-Za-z0-9._~-]+")
+
+
+def _check_api_path(path: str) -> None:
+    if not isinstance(path, str) or not path.startswith("/"):
+        raise APIError(f"Refused to send a request to a malformed path: {path!r}")
+    if any(c in path for c in "?#\\") or " " in path:
+        raise APIError(f"Refused a request path with a query, fragment, or space: {path!r}")
+    segments = path.split("/")[1:]  # drop the leading empty from the leading '/'
+    if segments and segments[-1] == "":
+        segments = segments[:-1]  # a single trailing slash is fine
+    for seg in segments:
+        if seg in ("", ".", "..") or not _SAFE_SEGMENT.fullmatch(seg):
+            raise APIError(
+                f"Refused an unsafe or empty segment in request path {path!r} "
+                "(a required id may be missing or malformed)."
+            )
+
+
+def _rewind_files(files: Any) -> None:
+    """Seek every upload file handle back to the start before a retry.
+
+    httpx does not rewind file objects between sends, so a retried multipart
+    upload would otherwise transmit zero bytes.
+    """
+    if not files:
+        return
+    for item in files:
+        value = item[1] if isinstance(item, (list, tuple)) and len(item) > 1 else item
+        fileobj = value[1] if isinstance(value, (list, tuple)) and len(value) > 1 else value
+        try:
+            fileobj.seek(0)
+        except (AttributeError, OSError, ValueError):
+            pass  # not a seekable stream; nothing we can do
 
 
 def callback_port() -> int:
@@ -33,18 +79,50 @@ def callback_port() -> int:
 
 
 # Cap on how many pages we will auto-follow, so a huge project can never hang a
-# tool call indefinitely. 20 pages is far more than a person reads in one go.
-_MAX_PAGES = 20
+# tool call indefinitely. On reaching it, get_all sets `last_truncated` so a
+# caller presenting counts can say so instead of understating silently.
+_MAX_PAGES = 100
 
 
 class QCClient:
-    def __init__(self, store: Store | None = None) -> None:
-        self.store = store or Store()
+    """HTTP client for the QC Database API.
+
+    Two credential modes:
+
+    * **stdio / local** (default) - ``store`` holds the on-disk token and this
+      client silently refreshes it via the OAuth refresh token.
+    * **hosted** - ``access_token`` is the bearer token from the current
+      authenticated request. There is no refresh: the token's lifetime is the
+      MCP client's problem, so a 401 simply surfaces as "re-authenticate".
+
+    In hosted mode a shared ``http`` connection pool is passed in and this client
+    does not own (or close) it.
+    """
+
+    def __init__(
+        self,
+        store: Any = None,
+        *,
+        access_token: str | None = None,
+        http: httpx.Client | None = None,
+    ) -> None:
+        self.store = store if store is not None else Store()
         self.port = callback_port()
-        self._http = httpx.Client(base_url=BASE_URL, timeout=60.0, follow_redirects=True)
+        self._access_token = access_token
+        # Set by get_all() when it stops at the page cap; callers that present
+        # counts (e.g. turnover_report) can check it and flag "at least N".
+        self.last_truncated = False
+        if http is not None:
+            self._http = http
+            self._owns_http = False
+        else:
+            self._http = httpx.Client(base_url=BASE_URL, timeout=60.0, follow_redirects=True)
+            self._owns_http = True
 
     # ----- core request --------------------------------------------------
     def _headers(self) -> dict[str, str]:
+        if self._access_token is not None:
+            return {"Authorization": f"Bearer {self._access_token}"}
         token = ensure_access_token(self.store, self.port)
         return {"Authorization": f"Bearer {token}"}
 
@@ -59,6 +137,7 @@ class QCClient:
         files: Any | None = None,
     ) -> Any:
         """Make one authenticated request and return parsed JSON (or None)."""
+        _check_api_path(path)
         clean_params = {k: v for k, v in (params or {}).items() if v is not None}
 
         def _send() -> httpx.Response:
@@ -74,10 +153,14 @@ class QCClient:
 
         try:
             resp = _send()
-            if resp.status_code == 401:
-                # Token may have just been revoked/expired server-side; try one
-                # forced refresh, then retry the call.
+            if resp.status_code == 401 and self._access_token is None:
+                # stdio only: the token may have just expired server-side; force
+                # one refresh and retry. In hosted mode we cannot refresh someone
+                # else's token, so a 401 falls straight through to _handle.
                 refresh(self.store, self.port)
+                # The first send read any upload file handles to EOF; rewind them
+                # so the retry does not silently upload zero bytes.
+                _rewind_files(files)
                 resp = _send()
         except httpx.HTTPError as exc:
             raise APIError(f"Could not reach QC Database: {exc}") from exc
@@ -145,6 +228,7 @@ class QCClient:
         """GET a binary file (a rendered PDF, an original upload) and return its
         raw bytes. Uses the same auth + one-shot-refresh handling as request(),
         but does not try to parse the body as JSON."""
+        _check_api_path(path)
         clean_params = {k: v for k, v in params.items() if v is not None}
 
         def _send() -> httpx.Response:
@@ -152,7 +236,7 @@ class QCClient:
 
         try:
             resp = _send()
-            if resp.status_code == 401:
+            if resp.status_code == 401 and self._access_token is None:
                 refresh(self.store, self.port)
                 resp = _send()
         except httpx.HTTPError as exc:
@@ -176,28 +260,52 @@ class QCClient:
 
     # ----- pagination ----------------------------------------------------
     def get_all(self, path: str, **params: Any) -> list[Any]:
-        """GET a list endpoint, following DRF pagination up to a sane cap."""
+        """GET a list endpoint, following DRF pagination up to a sane cap.
+
+        Follows the server's ``next`` link by reusing *its* query parameters on
+        the same (trusted, relative) path, so this works for page-number and
+        cursor/offset pagination alike. Sets ``self.last_truncated`` if the page
+        cap is hit before the list is exhausted.
+        """
+        self.last_truncated = False
         results: list[Any] = []
-        page = 1
-        while page <= _MAX_PAGES:
-            payload = self.get(path, page=page, **params)
+        next_params: dict[str, Any] | None = None
+
+        for _ in range(_MAX_PAGES):
+            call_params = params if next_params is None else {**params, **next_params}
+            payload = self.get(path, **call_params)
+
             if isinstance(payload, list):
                 return payload
             if not isinstance(payload, dict):
-                return results
-            if "results" in payload:
+                return results if results else ([] if payload is None else [payload])
+
+            if "results" in payload and isinstance(payload["results"], list):
                 results.extend(payload["results"])
-                if not payload.get("next"):
-                    break
-                page += 1
+                nxt = payload.get("next")
+                if not nxt:
+                    return results
+                next_params = dict(parse_qsl(urlsplit(str(nxt)).query))
+                if not next_params:
+                    return results  # malformed 'next' - stop rather than loop
                 continue
+
             # Non-paginated custom shapes (e.g. {"items": [...]}, {"notes": [...]},
-            # {"schemas": [...]}, {"photos": [...]}).
-            for key in ("items", "notes", "data", "schemas", "photos"):
+            # {"schemas": [...]}, {"photos": [...]}, {"subsections": [...]}).
+            for key in ("items", "notes", "data", "schemas", "photos", "subsections"):
                 if key in payload and isinstance(payload[key], list):
                     return payload[key]
             return [payload]
+
+        # Fell out of the loop => still had a 'next' at the cap.
+        self.last_truncated = True
+        print(
+            f"[qcdatabase-mcp] warning: '{path}' returned more than {_MAX_PAGES} "
+            "pages; result list truncated, counts may be incomplete.",
+            file=sys.stderr,
+        )
         return results
 
     def close(self) -> None:
-        self._http.close()
+        if self._owns_http:
+            self._http.close()

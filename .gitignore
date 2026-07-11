@@ -216,3 +216,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# QC Database MCP — never commit local credentials or session state.
+# The token store lives in a per-user OS config dir by default (outside any
+# checkout); these entries are belt-and-suspenders in case it is pointed here.
+store.json
+qcdatabase-mcp/
+.qcdatabase-mcp/

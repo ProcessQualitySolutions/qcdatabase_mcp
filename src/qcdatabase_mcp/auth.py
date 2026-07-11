@@ -19,6 +19,7 @@ import base64
 import hashlib
 import http.server
 import secrets
+import sys
 import time
 import urllib.parse
 import webbrowser
@@ -46,8 +47,10 @@ DEFAULT_SCOPES = (
     "references:read references:write "
     "photos:read photos:write "
     "linespecs:read linespecs:write "
+    "locks:read locks:write "
     "lists:read "
-    "shippers:read"
+    "shippers:read "
+    "manual:read"
 )
 
 CLIENT_NAME = "QC Database Local MCP Server"
@@ -114,10 +117,16 @@ class _CallbackHandler(http.server.BaseHTTPRequestHandler):
         pass
 
 
-def _wait_for_callback(port: int, timeout: float) -> dict[str, str]:
+def _start_callback_server(port: int) -> http.server.HTTPServer:
+    """Bind the loopback callback listener. Do this BEFORE opening the browser so
+    a fast redirect (remembered consent) cannot hit a closed port."""
     _CallbackHandler.result = {}
     server = http.server.HTTPServer(("127.0.0.1", port), _CallbackHandler)
     server.timeout = 1.0
+    return server
+
+
+def _pump_callback(server: http.server.HTTPServer, timeout: float) -> dict[str, str]:
     deadline = time.time() + timeout
     try:
         while time.time() < deadline and not _CallbackHandler.result:
@@ -198,8 +207,16 @@ def login(store: Store, port: int, timeout: float = 300.0) -> dict[str, Any]:
         }
     )
 
-    # Open the browser, but keep going even if it fails (headless box etc.) -
-    # the URL is also returned to the caller so they can open it manually.
+    # Bind the loopback listener FIRST, then open the browser, so a quick
+    # redirect can't race a not-yet-listening port.
+    try:
+        server = _start_callback_server(port)
+    except OSError as exc:
+        raise AuthError(
+            f"Could not start the local sign-in listener on 127.0.0.1:{port}: {exc}. "
+            "Set QCDB_CALLBACK_PORT to a free port and try again."
+        ) from exc
+
     opened = False
     try:
         opened = webbrowser.open(authorize_url)
@@ -207,12 +224,15 @@ def login(store: Store, port: int, timeout: float = 300.0) -> dict[str, Any]:
         opened = False
 
     if not opened:
-        raise AuthError(
+        # Headless box, etc. Keep the listener up and tell the user where to go;
+        # the same PKCE verifier/state stay valid, so a manual open completes.
+        print(
             "Could not open a browser automatically. Open this URL to finish "
-            f"signing in, then run the login again:\n{authorize_url}"
+            f"signing in:\n{authorize_url}",
+            file=sys.stderr,
         )
 
-    result = _wait_for_callback(port, timeout)
+    result = _pump_callback(server, timeout)
     if not result:
         raise AuthError(
             "Timed out waiting for the browser sign-in. Please run login again. "
@@ -263,11 +283,19 @@ def refresh(store: Store, port: int) -> dict[str, Any]:
     try:
         resp = httpx.post(_TOKEN_URL, data=data, timeout=30.0)
     except httpx.HTTPError as exc:
+        # Network trouble is transient - keep the token so a retry can succeed.
         raise AuthError(f"Could not reach QC Database to refresh the session: {exc}") from exc
     if resp.status_code != 200:
-        store.clear_token()
+        # Only an invalid-grant style response means the refresh token is truly
+        # dead; clear it then. A transient 5xx must NOT log the user out.
+        if resp.status_code in (400, 401):
+            store.clear_token()
+            raise AuthError(
+                "Your session expired and could not be refreshed. Run 'login' again."
+            )
         raise AuthError(
-            "Your session expired and could not be refreshed. Run 'login' again."
+            f"Could not refresh your session right now (server returned {resp.status_code}). "
+            "Please try again in a moment."
         )
     new_token = resp.json()
     # Rotation is on; the server may not re-send the refresh token, so keep ours.
