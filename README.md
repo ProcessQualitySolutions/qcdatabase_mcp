@@ -388,7 +388,8 @@ at `/` (connection instructions for humans) and a **health check** at `/health`
 
 ```
 ./scripts/run-local.sh        # Mac/Linux
-.\scripts\run-local.ps1       # Windows
+.\scripts\run-local.ps1       # Windows (PowerShell)
+scripts\run-local.bat         # Windows (double-clickable / cmd)
 ```
 
 Then open <http://127.0.0.1:8000/> in a browser.
