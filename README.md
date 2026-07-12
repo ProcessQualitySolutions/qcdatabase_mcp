@@ -379,13 +379,34 @@ Environment variables (stdio mode):
 
 By default the server speaks MCP over **stdio** — one local user, sign-in via the
 `login` tool. Pass `--http` to run the **multi-user hosted** server instead, which
-serves the **Streamable HTTP** transport at `/mcp`:
+serves the **Streamable HTTP** transport at `/mcp`, plus a public **home page**
+at `/` (connection instructions for humans) and a **health check** at `/health`
+(for load balancers and uptime monitors).
+
+**Try it on your own machine** (creates a `.venv`, installs, runs on
+`http://127.0.0.1:8000`):
 
 ```
-qcdatabase-mcp --http                              # loopback dev
-QCDB_MCP_RESOURCE_URL=https://mcp.qcdatabase.ai \
-  qcdatabase-mcp --http --host 0.0.0.0 --port 8000 # production, behind a TLS proxy
+./scripts/run-local.sh        # Mac/Linux
+.\scripts\run-local.ps1       # Windows
 ```
+
+Then open <http://127.0.0.1:8000/> in a browser.
+
+**Deploy it on a server** so that `git pull` + restart is a complete deploy —
+the full walkthrough (systemd unit, nginx/Caddy configs, verification
+checklist, troubleshooting) is in [`deploy/README.md`](deploy/README.md):
+
+```
+cp deploy/example.env .env    # set QCDB_MCP_RESOURCE_URL=https://mcp.example.com
+./scripts/run-server.sh       # binds 127.0.0.1:8000; put a TLS proxy in front
+```
+
+> **Behind nginx you MUST forward the original Host header**
+> (`proxy_set_header Host $host;`) — the provided `deploy/nginx.conf` does.
+> Without it, the DNS-rebinding protection rejects every authenticated request
+> with `421`, which looks like "OAuth works but no tool call ever does". Caddy
+> (`deploy/Caddyfile`) does the right thing by default.
 
 In hosted mode the server is an **OAuth 2.0 resource server** (per the MCP
 authorization spec) — there are no shared secrets and nothing is stored on disk:
@@ -423,6 +444,13 @@ Hosted-mode configuration (flags override env):
   token revoked upstream keeps working here; lower it to shrink that window.
 - `QCDB_MCP_TOKEN_NEG_CACHE_TTL` — seconds a *failed* verification is remembered
   (default `5`), which blunts garbage-token amplification against the API.
+- `QCDB_MCP_STATELESS` — serve each request without a server-held MCP session
+  (default `1`). Leave on: stateful sessions break on restarts, redeploys, and
+  multi-replica setups ("session not found"). Set `0` only if you need
+  server-initiated messages within a session.
+- `QCDB_MCP_JSON_RESPONSE` — answer POSTs with plain JSON instead of an SSE
+  stream (default `1`). Leave on: buffering proxies (nginx's default) stall SSE
+  and the client times out; none of this server's tools stream partial results.
 
 **TLS.** Terminate TLS at a reverse proxy in front of the server (never expose
 plain HTTP publicly) and forward the real `Host` header.

@@ -92,6 +92,35 @@ def resource_url() -> str:
     return f"http://{bind_host()}:{bind_port()}"
 
 
+def _env_flag(name: str, default: str) -> bool:
+    return os.environ.get(name, default).strip().lower() in _TRUTHY
+
+
+def stateless_enabled() -> bool:
+    """Serve each request statelessly (no server-held MCP session). Default ON.
+
+    Stateful Streamable-HTTP keeps per-connection session state in this process,
+    which breaks the moment there is a restart, a redeploy, or a second replica
+    ("session not found" on every call until the client reconnects). All state
+    this server actually needs per user (the pinned project) already lives in
+    :func:`session_store`, so stateless is strictly more robust for hosting.
+    Set ``QCDB_MCP_STATELESS=0`` to restore stateful sessions.
+    """
+    return _env_flag("QCDB_MCP_STATELESS", "1")
+
+
+def json_response_enabled() -> bool:
+    """Answer POSTs with plain JSON instead of an SSE stream. Default ON.
+
+    SSE responses are the classic remote-MCP deployment killer: any proxy that
+    buffers (nginx does by default) holds the stream and the client times out.
+    None of this server's tools stream partial results, so plain JSON loses
+    nothing and works through every proxy. Set ``QCDB_MCP_JSON_RESPONSE=0`` to
+    restore SSE responses.
+    """
+    return _env_flag("QCDB_MCP_JSON_RESPONSE", "1")
+
+
 def _split(raw: str | None) -> list[str]:
     if not raw:
         return []

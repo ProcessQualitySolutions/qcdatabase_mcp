@@ -1,0 +1,35 @@
+# systemd unit for the hosted QC Database MCP server.
+#
+# Install (adjust paths/user to your server):
+#   sudo cp deploy/qcdatabase-mcp.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now qcdatabase-mcp
+#
+# Deploying an update is then:
+#   git pull && sudo systemctl restart qcdatabase-mcp
+#
+# Configuration lives in <repo>/.env (copy deploy/example.env there and edit).
+
+[Unit]
+Description=QC Database MCP server (hosted HTTP mode)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+# CHANGE these two to the user that owns the checkout and the checkout path.
+User=qcdbmcp
+WorkingDirectory=/opt/qcdatabase_mcp
+ExecStart=/opt/qcdatabase_mcp/scripts/run-server.sh
+Restart=always
+RestartSec=3
+
+# Hardening: the server needs no filesystem beyond its own venv.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/qcdatabase_mcp
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,10 @@
+# Caddy reverse proxy for the hosted QC Database MCP server.
+# Caddy gets TLS certificates automatically and forwards the Host header by
+# default, so this is the whole config. The easiest option if you're starting
+# fresh.
+
+mcp.qcdatabase.ai {   # CHANGE to your domain
+    reverse_proxy 127.0.0.1:8000 {
+        flush_interval -1   # stream immediately (matters only in SSE mode)
+    }
+}

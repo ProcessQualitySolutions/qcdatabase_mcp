@@ -57,7 +57,17 @@ if hosted.hosted_enabled():
         token_verifier=hosted.QCDBTokenVerifier(),
         auth=hosted.auth_settings(),
         transport_security=hosted.transport_security(),
+        # Stateless + JSON responses (both default ON, see hosted.py) are what
+        # make this server survive real deployments: no SSE stream for a
+        # buffering reverse proxy to stall, and no in-process MCP session for a
+        # restart, redeploy, or second replica to invalidate.
+        stateless_http=hosted.stateless_enabled(),
+        json_response=hosted.json_response_enabled(),
     )
+    # Public, unauthenticated pages: the home page (how to connect) and /health.
+    from .pages import register_pages
+
+    register_pages(mcp)
 else:
     mcp = FastMCP("qcdatabase")
 
