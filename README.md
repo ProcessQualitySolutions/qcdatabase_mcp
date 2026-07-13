@@ -1,3 +1,6 @@
+> WARNING! Our apologies, but some of the modifications we made to allow remote hosting of this MCP server have broken the stdio tools. We are working on a fix ASAP. Please check back here later.
+
+
 # QC Database MCP Server
 
 A small program that lets an AI assistant (like Claude) do your everyday
