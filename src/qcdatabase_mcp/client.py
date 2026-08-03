@@ -135,10 +135,17 @@ class QCClient:
         json: Any | None = None,
         data: dict[str, Any] | None = None,
         files: Any | None = None,
+        timeout: float | None = None,
     ) -> Any:
-        """Make one authenticated request and return parsed JSON (or None)."""
+        """Make one authenticated request and return parsed JSON (or None).
+
+        ``timeout`` overrides the client default for this call - for endpoints
+        that do a lot of work in one round trip (the zipmap ingest builds a
+        drawing and all of its map items in a single transaction).
+        """
         _check_api_path(path)
         clean_params = {k: v for k, v in (params or {}).items() if v is not None}
+        extra: dict[str, Any] = {} if timeout is None else {"timeout": timeout}
 
         def _send() -> httpx.Response:
             return self._http.request(
@@ -149,6 +156,7 @@ class QCClient:
                 data=data,
                 files=files,
                 headers=self._headers(),
+                **extra,
             )
 
         try:
@@ -207,16 +215,42 @@ class QCClient:
         if isinstance(body, dict):
             for key in ("detail", "error_description", "error", "message"):
                 if key in body:
-                    return str(body[key])
+                    return str(body[key]) + QCClient._itemized(body)
             return "; ".join(f"{k}: {v}" for k, v in body.items())[:400]
         return str(body)[:300]
+
+    @staticmethod
+    def _itemized(body: dict[str, Any]) -> str:
+        """Append a per-field/per-item error list, when the body carries one.
+
+        Validation-heavy endpoints (the zipmap ingest most of all) answer with a
+        summary ``error`` plus an ``errors`` array that says *which* item or field
+        failed - RFC 6901 JSON pointers, codes, and messages. Dropping that array
+        would leave the assistant with "validation failed" and nothing to fix.
+        """
+        errors = body.get("errors")
+        if not isinstance(errors, list) or not errors:
+            return ""
+        lines = []
+        for item in errors[:20]:
+            if isinstance(item, dict):
+                where = item.get("pointer") or item.get("field") or item.get("item_id") or ""
+                msg = item.get("message") or item.get("detail") or str(item)
+                lines.append(f"  - {where}: {msg}" if where else f"  - {msg}")
+            else:
+                lines.append(f"  - {item}")
+        if len(errors) > 20:
+            lines.append(f"  - ... and {len(errors) - 20} more")
+        return "\n" + "\n".join(lines)
 
     # ----- convenience verbs --------------------------------------------
     def get(self, path: str, **params: Any) -> Any:
         return self.request("GET", path, params=params)
 
-    def post(self, path: str, json: Any | None = None, **params: Any) -> Any:
-        return self.request("POST", path, json=json, params=params)
+    def post(
+        self, path: str, json: Any | None = None, *, timeout: float | None = None, **params: Any
+    ) -> Any:
+        return self.request("POST", path, json=json, params=params, timeout=timeout)
 
     def patch(self, path: str, json: Any | None = None, **params: Any) -> Any:
         return self.request("PATCH", path, json=json, params=params)

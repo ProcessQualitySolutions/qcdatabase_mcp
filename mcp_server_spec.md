@@ -185,8 +185,9 @@ complete.
   for map items, document folders, and forms
   (`/api/projects/{id}/schemas/…`).
 - **Controlled-vocabulary lists:** `/api/lists/projects/{project_id}/…` — read
-  lists and items (each item carrying a `pseudo_code` pill); create/update/delete
-  items.
+  lists and items (each item carrying a `pseudo_code` pill); create/update items,
+  and delete one — a **soft** delete that hides the entry from list reads while
+  keeping the record (and who removed it) intact.
 - **Jobs & packages:** `/api/jobs/…`, `/api/packages/…` — work orders and the test
   packages under them.
 - **Line specifications:** `/api/line-specs/…`.
@@ -202,12 +203,27 @@ complete.
   preserve the source's geometry form (point welds from PCF vs. rectangular welds
   from .weldb); this makes the server a strong companion to CAD, PCF, and .weldb
   systems.
+- **Zipmap ingest:** `POST /api/mapping/projects/{project_id}/zipmaps/` — one
+  transaction that creates a drawing (PNG display layer + PDF), its map items
+  across one or more schemas, and optionally the drawing's extracted-data record,
+  from a [zipmap](https://github.com/ProcessQualitySolutions/zipmaps) interchange
+  document (`.zipmap.json`). No server-side AI runs: the sender's AI produced the
+  map. A **`package_id` is required** (a missing one is a `422`), each dataset
+  names a server-side **`schema_id`**, and item coordinates are pixels of the
+  embedded PNG. `mode=replace` soft-deletes a same-numbered live drawing in that
+  package first; `mode=append` (default) always creates a new one. Validation is
+  all-or-nothing, returning RFC 6901 pointers per failure. A server SHOULD bind a
+  zipmap's local type names to schema ids (`/api/projects/{id}/schemas/map-items/`)
+  and confirm the scope package *before* sending the document.
 - **Quality-hold locks:** `/api/locks/projects/{project_id}/…` — quality hold /
   witness points on a map item or ITP line item (fit-up, FME, final-closure
   inspections, etc.). A lock holds an item until an authorized inspector clears it,
   so it cannot be turned in with the hold in place. Lock *types* are the named hold
   definitions; *locks* are the holds placed on items (place, unlock — which keeps
-  the record — reassign, delete). This is a construction quality gate, **not** a
+  the record — reassign, and delete: a **soft** delete that withdraws the hold and
+  frees its type to be re-held, while the lock itself is retained in the audit
+  trail — unlocking, not deleting, is what asserts an inspection happened). This
+  is a construction quality gate, **not** a
   security/access-control mechanism; treat placing and clearing holds as the user's
   decision (see §7). Lock-*type* management (create/edit/archive, and the
   permission matrix for who may place or clear each type) is permission-sensitive

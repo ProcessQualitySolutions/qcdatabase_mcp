@@ -187,9 +187,11 @@ Then ask Claude to **"connect to QC Database"** to sign in — see below.
 - **Session:** `login`, `logout`, `auth_status`, `whoami`
 - **Find your way around:** `list_tenants`, `list_projects`, `set_project`,
   `get_active_project`, `list_project_members`, `list_lists`, `list_list_items`,
-  `list_map_item_schemas`, `list_document_folders`, `list_form_schemas`
+  `list_map_item_schemas`, `get_map_item_schema`, `list_document_folders`,
+  `list_form_schemas`
 - **Controlled-vocabulary lists:** `create_list_item`, `update_list_item`,
-  `delete_list_item`
+  `delete_list_item` (a soft delete — the entry stops appearing in list reads but
+  stays on record)
 - **Jobs & packages:** `list_jobs`, `create_job`, `list_packages`,
   `create_package`, `list_line_specs`, `create_line_spec`
 - **Upload records:** `upload_document`, `upload_document_version`,
@@ -206,6 +208,8 @@ Then ask Claude to **"connect to QC Database"** to sign in — see below.
   (place welds/flanges by pixel coordinates), `bulk_create_map_items`,
   `bulk_update_map_items` (batch up to 500 items on one drawing/schema). **Always
   call `list_map_item_schemas` first** — see the CAD/PCF/.weldb note below
+- **Zipmaps (a whole mapped drawing in one upload):** `inspect_zipmap`,
+  `upload_zipmap` — see [Zipmaps](#zipmaps-a-whole-mapped-drawing-in-one-upload)
 - **Repairs:** `list_repair_codes`, `add_map_item_repair`
 - **Inspection forms & notes:** `list_form_submissions`, `create_form_submission`,
   `get_form_submission`, `update_form_submission`, `complete_form_submission`,
@@ -218,7 +222,9 @@ Then ask Claude to **"connect to QC Database"** to sign in — see below.
   (read only), `list_locks`, `get_lock`, `add_lock` (place a hold point — fit-up,
   tack-up, weld-cleanliness, FME, final-closure, boiler-tube FME sponge-in/sponge-out,
   etc. — on a map item or ITP line item so it can't be turned in until inspected),
-  `unlock_lock`, `assign_lock`, `delete_lock`. A lock is a construction quality gate,
+  `unlock_lock`, `assign_lock`, `delete_lock` (withdraws a hold placed in error — a
+  soft delete: kept in the audit trail, no longer holding the item; use `unlock_lock`
+  for a hold that was actually satisfied). A lock is a construction quality gate,
   **not** a security control; place or clear one only at the explicit request of its
   owner/author or an authorized inspector. **Creating or editing lock *types*** (the
   named hold definitions, and who may place/clear each) is intentionally **not**
@@ -261,6 +267,55 @@ habits:
    preserved. Collapsing a rectangular weld to a bare point (or spreading a point
    weld into a box) silently corrupts the map. Fetching the schema up front is
    what makes this distinction obvious before any items are placed.
+
+---
+
+## Zipmaps: a whole mapped drawing in one upload
+
+A **[zipmap](https://github.com/ProcessQualitySolutions/zipmaps)** is a plain zip
+that packages **one drawing** (a PNG, optionally the source single-page PDF)
+together with **every map item already placed on it** and the JSON Schemas that
+describe those item types. It is the "bring your own AI" hand-off: your model,
+CAD export, or takeoff tool produces the map; QC Database ingests it.
+
+`upload_zipmap` replaces the old three-step dance (upload the drawing → wait →
+bulk-create items against it) with **one transactional request**. The drawing, all
+of its map items across every schema, and its extracted data are created together
+— or nothing is. No server-side AI runs on it; the map is yours.
+
+Ask for it in plain language: *"upload this zipmap into the Unit 2 hydro
+package."* Behind that, the assistant does three things first:
+
+1. **`inspect_zipmap`** — looks inside without uploading: the drawing size, how
+   many items of each type, the data fields those items use, and which types are
+   **not yet bound** to a QC Database map item schema.
+2. **`list_map_item_schemas` / `get_map_item_schema`** — a zipmap names its types
+   locally (`weld`, `heat`); QC Database identifies schemas by id. Any unbound type
+   must be paired with the schema it belongs on (`schema_ids={"weld": "<id>"}`),
+   and comparing the type's fields against the schema's fields is how that match is
+   confirmed. Producers can skip this by writing the id into the archive's
+   `schemata/<type>.schema.json` up front.
+3. **`list_packages`** — the new drawing has to be filed somewhere, and the API
+   **requires** a package id. Pick (or `create_package`) the scope package first.
+
+Coordinates travel as **pixels of the zipmap's PNG** (top-left origin, y down) —
+exactly the space QC Database maps in — so nothing is rescaled or flipped. If the
+project uses per-schema auto-numbering, its labels win over the zipmap's item ids
+and the result reports each new item against the id it came from.
+
+Re-sending a corrected map? `mode="replace"` first **soft-deletes** any live
+drawing in that package with the same drawing number (retained in the audit trail,
+gone from drawing lists, and its map items go with it) instead of leaving a
+duplicate. The default, `mode="append"`, always creates a new drawing.
+
+Everything that can be checked locally is checked **before** the upload — a
+missing PNG, a type with no schema id, a coordinate outside the drawing, PDF-space
+coordinates that would misplace every item — so a bad map fails in a second with a
+list of what to fix, not after a multi-megabyte round trip.
+
+> Zipmaps are read from your own computer, so this works with the local (stdio)
+> server. A hosted server never touches your disk (see
+> [Filesystem safety](#filesystem-safety-design-invariant)).
 
 ---
 

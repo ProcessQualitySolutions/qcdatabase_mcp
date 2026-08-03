@@ -29,6 +29,7 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 
 from . import BASE_URL
+from . import zipmap as zm
 from .auth import AuthError, login as run_login
 from .client import APIError, QCClient
 from .config import config_dir
@@ -243,6 +244,34 @@ def _render_manual_search(payload: Any) -> str:
     return "\n".join(lines)
 
 
+def _schema_field_names(definition: Any) -> list[str]:
+    """Best-effort field names out of a schema_definition, whatever its shape.
+
+    Map item schemas carry their custom fields as a JSON-Schema-style
+    ``{"properties": {...}}`` object, a ``{"fields": [...]}`` list, or a bare
+    list of field objects. Callers only need the names, so read whichever shape
+    is there and skip the rest rather than assuming one.
+    """
+    if isinstance(definition, dict):
+        props = definition.get("properties")
+        if isinstance(props, dict):
+            return [str(k) for k in props]
+        definition = definition.get("fields", definition)
+    if isinstance(definition, dict):
+        return [str(k) for k in definition if not str(k).startswith("$")]
+    if isinstance(definition, list):
+        names = []
+        for field in definition:
+            if isinstance(field, dict):
+                name = field.get("name") or field.get("key") or field.get("label")
+                if name:
+                    names.append(str(name))
+            elif isinstance(field, str):
+                names.append(field)
+        return names
+    return []
+
+
 def _ref_name(ref: Any) -> str:
     """Pull a display name out of a nested {id, name} ref (or return '')."""
     if isinstance(ref, dict):
@@ -399,11 +428,59 @@ def _open_file(path: str) -> tuple[str, Any, str]:
     return safe.name, safe.open("rb"), ctype
 
 
+def _read_bytes(path: str | Path) -> bytes:
+    """Read a whole local file the caller pointed at, through the same guard."""
+    safe = _guard_local_path(Path(path), write=False)
+    if not safe.is_file():
+        raise FileNotFoundError(f"No file at: {path}")
+    return safe.read_bytes()
+
+
 def _save_bytes(save_path: str, content: bytes) -> Path:
     safe = _guard_local_path(Path(save_path), write=True)
     safe.parent.mkdir(parents=True, exist_ok=True)
     safe.write_bytes(content)
     return safe
+
+
+def _zipmap_members(file_path: str) -> tuple[dict[str, bytes], bool]:
+    """Load a zipmap's parts from a ``.zipmap`` archive or a working folder.
+
+    Returns ``({member name: bytes}, from_archive)``. An archive is read
+    entirely in memory - nothing is ever extracted to disk - and a folder is
+    read member by member, each file re-checked by the same local-path guard so
+    a symlink inside it cannot reach the server's own files.
+    """
+    safe = _guard_local_path(Path(file_path), write=False)
+    if not safe.is_dir():
+        return zm.read_archive(_read_bytes(safe)), True
+
+    candidates = [safe / zm.MANIFEST, safe / zm.EXTRACTED_DATA,
+                  safe / zm.IMG_DIR / zm.DRAWING_PNG, safe / zm.PDF_DIR / zm.DRAWING_PDF]
+    candidates += sorted((safe / zm.IMG_DIR).glob("*.json"))
+    candidates += sorted((safe / zm.SCHEMATA_DIR).glob("*.schema.json"))
+
+    members: dict[str, bytes] = {}
+    total = 0
+    for path in candidates:
+        name = path.relative_to(safe).as_posix()
+        if name in members or not zm.wanted_member(name) or not path.is_file():
+            continue
+        raw = _read_bytes(path)
+        total += len(raw)
+        if total > zm.MAX_TOTAL_BYTES:
+            raise ValueError(
+                f"'{file_path}' holds more than {zm.MAX_TOTAL_BYTES // (1024 * 1024)} MB "
+                "of zipmap data - too large to upload in one request."
+            )
+        members[name] = raw
+    if not members:
+        raise ValueError(
+            f"'{file_path}' does not look like a zipmap folder (no {zm.MANIFEST} or "
+            f"{zm.IMG_DIR}/{zm.DRAWING_PNG}). Point at a .zipmap archive, a "
+            ".zipmap.json document, or the folder one was unpacked from."
+        )
+    return members, False
 
 
 def _safe(fn):
@@ -650,11 +727,18 @@ def update_list_item(item_id: str, name: str = "", status: str = "", data: str =
 @mcp.tool()
 @_safe
 def delete_list_item(item_id: str) -> str:
-    """Delete a controlled-vocabulary list entry. It is soft-deleted and stops
-    appearing in list reads."""
+    """Remove a controlled-vocabulary list entry from the project's lists.
+
+    This is a SOFT delete: the entry stops appearing in list reads, but the record
+    itself is kept (stamped with who removed it and when), so anything that already
+    cites it stays traceable. Nothing is erased from the database - but the pill for
+    this value can no longer be picked, so confirm with the user first."""
     pid = require_project()
     client().delete(f"/api/lists/projects/{pid}/items/{item_id}/delete/")
-    return f"List item {item_id} deleted."
+    return (
+        f"List item {item_id} removed (soft-deleted: hidden from list reads, kept on "
+        "record with who removed it)."
+    )
 
 
 @mcp.tool()
@@ -665,16 +749,56 @@ def list_map_item_schemas() -> str:
     of that type carries, so you need both its id AND its field list before creating
     any.
 
-    DO THIS FIRST, before 'create_map_item' or 'bulk_create_map_items'. Fetching the
-    schema up front lets you (1) place onto the RIGHT schema for what you're mapping,
-    and (2) map data from the source system - a CAD/CAE export, a PCF piping file, or
-    a .weldb boiler-panel file - onto the correct fields (joint type, material,
-    weight/sch, tube wall thickness, ...) instead of guessing. It is the single best
-    way to avoid mis-typed or half-empty map items, and to catch the point-weld (PCF)
-    vs. rectangular-weld (.weldb) distinction that 'create_map_item' describes."""
+    DO THIS FIRST, before 'create_map_item', 'bulk_create_map_items' or
+    'upload_zipmap'. Fetching the schema up front lets you (1) place onto the RIGHT
+    schema for what you're mapping, and (2) map data from the source system - a
+    CAD/CAE export, a PCF piping file, a .weldb boiler-panel file, or a .zipmap - onto
+    the correct fields (joint type, material, weight/sch, tube wall thickness, ...)
+    instead of guessing. It is the single best way to avoid mis-typed or half-empty
+    map items, and to catch the point-weld (PCF) vs. rectangular-weld (.weldb)
+    distinction that 'create_map_item' describes.
+
+    Each schema's id is also what binds a zipmap's item types to QC Database: a
+    zipmap names its types locally ('weld', 'heat'), and 'upload_zipmap' needs the
+    schema id each one maps to. Use 'get_map_item_schema' for one schema's full
+    field definitions."""
     pid = require_project()
     data = client().get_all(f"/api/projects/{pid}/schemas/map-items/")
-    return _render_list("Map item schemas:", data)
+    if not data:
+        return "Map item schemas:\nNone defined for this project."
+    lines = ["Map item schemas:", f"({len(data)} found)", ""]
+    for i, sc in enumerate(data, 1):
+        if not isinstance(sc, dict):
+            lines.append(f"{i}. {sc}")
+            continue
+        head = f"{i}. {_name_of(sc)}"
+        if sc.get("scope"):
+            head += f" [{sc['scope']}-scoped]"
+        if sc.get("is_active") is False:
+            head += " (inactive)"
+        lines.append(head)
+        if sc.get("id"):
+            lines.append(f"   id: {sc['id']}")
+        fields = _schema_field_names(sc.get("schema_definition"))
+        if fields:
+            lines.append(f"   fields: {', '.join(fields)}")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+@_safe
+def get_map_item_schema(schema_id: str) -> str:
+    """Get ONE map item schema's full definition - every custom field it declares,
+    with its type and options. Use it after 'list_map_item_schemas' when you need
+    more than the field names: which values a field accepts, which fields are
+    required, and which are backed by a controlled list (write those with the list
+    item's 'pseudo_code' pill from 'list_list_items', not free text).
+
+    Read this before mapping a source system's fields onto QC Database - a PCF or
+    .weldb export, or the item types inside a .zipmap - so each source value lands
+    on the field that actually holds it."""
+    pid = require_project()
+    return _pretty(client().get(f"/api/projects/{pid}/schemas/map-items/{schema_id}/"))
 
 
 @mcp.tool()
@@ -934,7 +1058,9 @@ def download_document(document_id: str, save_path: str) -> str:
 @_safe
 def list_drawings(drawing_type: str = "", status: str = "", search: str = "") -> str:
     """List the drawings in the current project (use a drawing's id when creating
-    map items on it). Optionally filter by drawing_type, status, or a search term."""
+    map items on it). Optionally filter by drawing_type, status, or a search term.
+    Removed drawings are soft-deleted, so they do not appear here (nor do their map
+    items) even though the records are retained."""
     pid = require_project()
     data = client().get_all(
         "/api/drawings/",
@@ -1031,7 +1157,9 @@ def upload_large_format_drawing(file_path: str, do_not_extract: bool = False) ->
 def upload_drawing_to_package(package_id: str, file_path: str, do_not_extract: bool = False) -> str:
     """Upload an isometric drawing (PDF) straight into a specific package in the
     current project. Multi-page PDFs are split into one drawing per sheet. Set
-    do_not_extract=True to skip server-side AI extraction.
+    do_not_extract=True to skip server-side AI extraction. If the drawing already
+    comes with its map items (a .zipmap), use 'upload_zipmap' instead - one request
+    lands the drawing and every item together.
 
     Confirm the package_id with the user first (use 'list_packages' if unsure).
     Also check whether the drawing is a new revision of one already in the
@@ -1263,7 +1391,10 @@ def bulk_create_map_items(drawing_id: str, schema_id: str, items: str) -> str:
     importer. Use it instead of many 'create_map_item' calls when placing a run
     of like items (e.g. all the welds on a sheet) - this is the natural way to
     import a weld map from a source system such as a PCF piping file or a .weldb
-    boiler-panel file. Pull the matching schema FIRST with 'list_map_item_schemas'
+    boiler-panel file. (If your source is a .zipmap - a drawing packaged with the
+    items already placed on it - use 'upload_zipmap' instead: it creates the drawing
+    and every item in one transaction, so you never place items against a drawing
+    that half-uploaded.) Pull the matching schema FIRST with 'list_map_item_schemas'
     so source fields (joint type, material, weight/sch, tube wall thickness) land
     correctly, and keep the source geometry: PCF welds are single POINT welds,
     .weldb welds are RECTANGULAR (give each item's x_position_2/y_position_2) - see
@@ -1408,6 +1539,237 @@ def add_map_item_repair(item_id: str, repair_code: str) -> str:
         f"/api/mapping/items/{item_id}/repair/", json={"repair_code": repair_code}
     )
     return f"Added repair '{repair_code}' to map item {item_id}.\n\n{_pretty(result)}"
+
+
+# ===========================================================================
+# Zipmaps (a whole mapped drawing in one upload)
+# ===========================================================================
+# A zipmap (https://github.com/ProcessQualitySolutions/zipmaps) packages ONE
+# drawing plus the map items already placed on it. Uploading one is the
+# streamlined alternative to "upload the drawing, wait, then bulk-create items
+# against it": QC Database ingests the whole thing in a single transaction, so
+# either the drawing, its items and its extracted data all land, or nothing
+# does. No server-side AI runs - the sender's AI produced the map.
+#
+# Two things a zipmap cannot know, and the caller must supply:
+#   * the SCOPE PACKAGE the created drawing is filed into (package_id, required
+#     by the API - see 'list_packages' / 'create_package'), and
+#   * the QC DATABASE SCHEMA ID for each of its item types, unless the producer
+#     already wrote them into schemata/<type>.schema.json (see
+#     'list_map_item_schemas').
+_ZIPMAP_MODES = ("append", "replace")
+_ZIPMAP_TIMEOUT = 300.0
+
+
+def _render_zipmap_result(result: Any, mode: str) -> str:
+    """Render the upload response: what was created, and any relabelling."""
+    if not isinstance(result, dict):
+        return _pretty(result)
+    lines: list[str] = []
+    image = result.get("image") or {}
+    if image.get("width"):
+        lines.append(f"Drawing image: {image.get('width')}x{image.get('height')} px")
+    pdf = result.get("pdf") or {}
+    if pdf:
+        how = "synthesized from the PNG" if pdf.get("synthesized") else "taken from the zipmap"
+        lines.append(f"PDF: {pdf.get('pages', 1)} page ({how})")
+    if (result.get("extracted_data") or {}).get("stored"):
+        lines.append("Extracted data: stored on the drawing")
+
+    total = 0
+    renamed: list[str] = []
+    for dataset in result.get("datasets") or []:
+        if not isinstance(dataset, dict):
+            continue
+        created = dataset.get("created", 0)
+        total += created or 0
+        lines.append(f"Schema {dataset.get('schema_id')}: {created} map item(s) created")
+        for item in dataset.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            source, label = item.get("source_id"), item.get("label")
+            if source and label and str(source) != str(label):
+                renamed.append(f"{source} -> {label}")
+    if renamed:
+        shown = ", ".join(renamed[:20]) + (" ..." if len(renamed) > 20 else "")
+        lines.append(
+            f"Note: this project's auto-numbering renamed {len(renamed)} item(s) "
+            f"(zipmap id -> QC Database label): {shown}"
+        )
+    replaced = result.get("replaced_drawing_ids") or []
+    if replaced:
+        lines.append(
+            f"mode=replace soft-deleted {len(replaced)} earlier drawing(s) with the same "
+            f"drawing number: {', '.join(str(r) for r in replaced)}"
+        )
+    head = (
+        f"Uploaded zipmap: created drawing {result.get('drawing_id')} in package "
+        f"{result.get('package_id')} with {total} map item(s) (mode={result.get('mode', mode)})."
+    )
+    return head + "\n\n" + "\n".join(lines) + "\n\n" + _pretty(result)
+
+
+@mcp.tool()
+@_safe
+def inspect_zipmap(file_path: str) -> str:
+    """Look inside a .zipmap (or .zipmap.json) WITHOUT uploading anything.
+
+    Read this before 'upload_zipmap'. It reports the drawing's size in pixels,
+    whether the archive carries a PDF and an extracted-data record, and - for each
+    item type in the map - how many items it holds, which data fields those items
+    actually use, and whether the type is already bound to a QC Database map item
+    schema id.
+
+    Any type reported as NOT BOUND must be matched by you: call
+    'list_map_item_schemas' (and 'get_map_item_schema' for the field list), decide
+    which schema that type belongs on, and pass the pairing to 'upload_zipmap' as
+    schema_ids. Comparing the type's fields here against the schema's fields is how
+    you confirm the match before anything is written.
+
+    Local files only - this works with the local (stdio) server, not a hosted one."""
+    if file_path.lower().endswith(".json"):
+        doc, info = zm.load_document(_read_bytes(file_path))
+        lines = [f"{file_path}: a flattened .zipmap.json document (ready to upload)."]
+        img = info["image"]
+        lines.append(f"Drawing image: {img['width']}x{img['height']} px")
+        lines.append(f"Carries a PDF: {'yes' if doc.get('pdf_b64') else 'no'}")
+        lines.append(f"Extracted-data record: {'yes' if info['has_extracted_data'] else 'no'}")
+        lines.append("")
+        for sid, count in info["counts"].items():
+            lines.append(f"- schema {sid}: {count} item(s)")
+        lines.append("")
+        lines.append(
+            "Every dataset already names a schema id, so this can go straight to "
+            "'upload_zipmap' - you still need to choose the package it files into."
+        )
+        return "\n".join(lines)
+
+    members, _ = _zipmap_members(file_path)
+    found = zm.inspect(members)
+    img = found["image"]
+    title = " - ".join(str(x) for x in (found["drawing_number"], found["title"]) if x)
+    lines = [f"Zipmap: {file_path}"]
+    if title:
+        rev = found["revision"]
+        lines.append(f"Drawing: {title}" + (f" (rev {rev})" if rev else ""))
+    lines.append(f"Image: {img['width']}x{img['height']} px ({img['bytes'] / 1024:.0f} KiB PNG)")
+    lines.append(f"Carries a PDF: {'yes' if found['has_pdf'] else 'no'}")
+    lines.append(f"Extracted-data record: {'yes' if found['has_extracted_data'] else 'no'}")
+    lines.append("")
+    if not found["types"]:
+        lines.append("No item types - this zipmap holds a drawing and nothing else.")
+    for t in found["types"]:
+        lines.append(f"- type '{t['type']}': {t['count']} item(s)")
+        if t["schema_id"]:
+            lines.append(f"    bound to QC Database schema: {t['schema_id']}")
+        else:
+            lines.append("    NOT BOUND - you must supply this type's schema id")
+        if t["fields"]:
+            lines.append(f"    fields used: {', '.join(t['fields'])}")
+    if found["unbound"]:
+        pairs = ", ".join(f'"{t}": "<schema id>"' for t in found["unbound"])
+        lines.append("")
+        lines.append(
+            "Before uploading, match each unbound type to a map item schema "
+            f"('list_map_item_schemas') and pass schema_ids={{{pairs}}}."
+        )
+    return "\n".join(lines)
+
+
+@mcp.tool()
+@_safe
+def upload_zipmap(
+    file_path: str,
+    package_id: str,
+    mode: str = "append",
+    schema_ids: str = "",
+    extracted_data: str = "",
+) -> str:
+    """Upload a zipmap - a whole mapped drawing (image + PDF + every map item on it)
+    in ONE transactional request. This is the streamlined way to bring in a weld map
+    your own AI or CAD/takeoff tooling produced: QC Database creates the drawing, all
+    of its map items across every schema, and its extracted-data record together, or
+    creates nothing at all. No server-side AI runs on it.
+
+    'file_path' is a .zipmap archive, the folder one was unpacked from, or an
+    already-flattened .zipmap.json document. Local files only (stdio server).
+
+    BEFORE YOU CALL THIS, do three things:
+      1. 'inspect_zipmap' - see the drawing, the item types and their fields, and
+         which types are not yet bound to a QC Database schema.
+      2. 'list_map_item_schemas' / 'get_map_item_schema' - pick the map item schema
+         each unbound type belongs on, matching the type's fields to the schema's.
+      3. 'list_packages' (or 'create_package') - choose the scope package the new
+         drawing is filed into. package_id is REQUIRED; the API rejects an upload
+         without one, and a package from another project is rejected too.
+
+    'schema_ids' is a JSON object pairing each zipmap type with its QC Database
+    schema id, e.g. {"weld": "5175bc71-...", "heat": "9a438a1e-..."}. Types the
+    producer already bound inside the archive can be left out. Confirm the pairing
+    with the user - every item of a type lands on the schema you name here.
+
+    'mode' is 'append' (default - always create a new drawing) or 'replace', which
+    first SOFT-DELETES any live drawing in that package sharing the same drawing
+    number, so re-sending a corrected map does not leave a duplicate behind. The
+    replaced drawing is retained in the audit trail, but it stops appearing in
+    drawing lists - and its map items go with it. Use 'replace' only when the user
+    has asked to supersede that drawing.
+
+    'extracted_data' optionally overrides the archive's extracted_data.json with a
+    JSON object of drawing-level extraction (bill of materials, line number, ...).
+
+    Item coordinates travel as PIXELS of the zipmap's PNG (top-left origin, y down),
+    which is exactly the space QC Database maps in, so nothing is rescaled. If this
+    project has per-schema auto-numbering with auto-rename turned on, its labels win
+    over the zipmap's item ids; the result reports each new item against the id it
+    came from."""
+    pid = require_project()
+    picked = (mode or "append").strip().lower()
+    if picked not in _ZIPMAP_MODES:
+        raise ValueError(f"mode must be one of {', '.join(_ZIPMAP_MODES)} (got {mode!r}).")
+    if not package_id:
+        raise ValueError(
+            "package_id is required - a zipmap's drawing must be filed into a scope "
+            "package. Use 'list_packages' to choose one, or 'create_package' to make it."
+        )
+
+    overrides = _parse_json_arg("schema_ids", schema_ids) or {}
+    if not isinstance(overrides, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in overrides.items()
+    ):
+        raise ValueError(
+            "'schema_ids' must be a JSON object of zipmap type -> QC Database schema "
+            'id, e.g. {"weld": "5175bc71-..."}.'
+        )
+    extra = _parse_json_arg("extracted_data", extracted_data) or None
+    if extra is not None and not isinstance(extra, dict):
+        raise ValueError("'extracted_data' must be a JSON object.")
+
+    if file_path.lower().endswith(".json"):
+        doc, _info = zm.load_document(_read_bytes(file_path))
+        if overrides:
+            raise ValueError(
+                "'schema_ids' applies to a .zipmap archive's type names. A "
+                ".zipmap.json document already names a schema id per dataset - edit "
+                "the document, or upload the .zipmap it came from."
+            )
+        if extra is not None:
+            doc["extracted_data"] = extra
+    else:
+        members, from_archive = _zipmap_members(file_path)
+        doc, _info = zm.build_document(
+            members, schema_ids=overrides, from_archive=from_archive, extracted_data=extra
+        )
+
+    result = client().post(
+        f"/api/mapping/projects/{pid}/zipmaps/",
+        json={"package_id": package_id, "mode": picked, "document": doc},
+        # One request carries the image, the PDF and every item, and the server
+        # builds all of it in a single transaction - well past the default read
+        # timeout for a big map.
+        timeout=_ZIPMAP_TIMEOUT,
+    )
+    return _render_zipmap_result(result, picked)
 
 
 # ===========================================================================
@@ -1788,8 +2150,10 @@ def mark_itp_accepted(item_id: str) -> str:
 # web app. Only one active lock of a given type may sit on an item at a time.
 # Unlocking clears the restriction but KEEPS the lock on record as part of the
 # permanent quality history; the item stays held if any OTHER type of lock on it
-# is still locked. Deleting removes the lock and frees that type to be re-held on
-# the item.
+# is still locked. Deleting is a SOFT delete: the lock stops holding the item and
+# its type is freed to be re-held, while the record itself is retained in the
+# audit trail (stamped with who removed it and when). Nothing here erases
+# quality history - but only unlocking asserts the inspection actually happened.
 #
 # WHO MAY TOUCH A LOCK. A lock belongs to the person who placed it (its author /
 # owner) and to authorized inspectors/admins. Locks are placed only at a user's
@@ -1855,7 +2219,9 @@ def list_locks(status: str = "", item_type: str = "", item_id: str = "") -> str:
     blocking turn-in, 'unlocked' for cleared ones kept on record, or 'all'), and/or
     narrow to one item by giving item_type ('map_item' or 'itp_line_item') together
     with that item's item_id. A 'locked' hold means that item cannot be turned in
-    until an authorized inspector clears it - do not clear one on your own."""
+    until an authorized inspector clears it - do not clear one on your own. Locks
+    that were withdrawn ('delete_lock') are not listed here; they stay in the audit
+    trail only."""
     pid = require_project()
     params: dict[str, Any] = {}
     if status:
@@ -1936,8 +2302,8 @@ def unlock_lock(lock_id: str) -> str:
     """Clear the hold on a quality-hold lock (mark it unlocked) - i.e. record that
     the required inspection/witness point has been satisfied. This releases the
     restriction so the held item can be turned in, UNLESS another lock of a
-    different type is still on it. The lock stays on record for the permanent
-    quality history - unlocking is not deleting, and it does not free the lock type
+    different type is still on it. The lock stays visible on the item as a satisfied
+    hold point - unlocking is not withdrawing it, and it does not free the lock type
     to be placed again.
 
     Unlocking is a verification sign-off: it asserts the inspection actually
@@ -1982,20 +2348,25 @@ def assign_lock(lock_id: str, assigned_to: str = "", assigned_user_type: str = "
 @mcp.tool()
 @_safe
 def delete_lock(lock_id: str) -> str:
-    """Delete a quality-hold lock. Unlike unlocking (which clears the restriction but
-    KEEPS the lock as a quality record), deleting REMOVES the hold entirely and frees
-    its type so the same hold can be placed on the item again. Use it to undo a lock
-    placed in error - not as a routine way to clear a satisfied hold (unlock that,
-    to preserve the record).
+    """Withdraw a quality-hold lock. This is a SOFT delete: the lock is stamped with
+    who removed it and when, and kept in the audit trail, but it stops appearing as a
+    lock on the item and frees its type so the same hold can be placed there again.
 
-    Deleting erases a witness point from the quality history, so do it ONLY when the
-    lock's owner/author or a lock admin explicitly asks. Never delete someone else's
-    hold to unblock or turn in work. Only allowed if the API permits you (see
-    can_delete on 'get_lock')."""
+    Unlike unlocking - which records that the inspection HAPPENED and keeps the lock
+    visible as a satisfied hold point - withdrawing says the hold should not have been
+    there. Use it to undo a lock placed in error, never as a routine way to clear a
+    satisfied hold: unlock those, so the quality history shows the witness point was
+    actually met.
+
+    Taking down someone's witness point is their call, so do it ONLY when the lock's
+    owner/author or a lock admin explicitly asks. Never withdraw someone else's hold
+    to unblock or turn in work. Only allowed if the API permits you (see can_delete on
+    'get_lock')."""
     pid = require_project()
     client().delete(f"/api/locks/projects/{pid}/locks/{lock_id}/")
     return (
-        f"Lock {lock_id} deleted (hold removed; its type can be re-placed).\n"
+        f"Lock {lock_id} withdrawn (soft-deleted: kept in the audit trail with who "
+        "removed it, no longer holding the item; its type can be placed again).\n"
         f"{_LOCK_OWNER_REMINDER}"
     )
 

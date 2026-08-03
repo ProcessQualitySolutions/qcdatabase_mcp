@@ -11,9 +11,12 @@ Concretely, for any change you make here:
 
 - **No tool may read or write the server's own source/installation directory.**
   This prevents self-modification. All local file access goes through
-  `_open_file` / `_save_bytes` in `server.py`, which call `_guard_local_path`.
-  Route any new local file access through those helpers — never call
-  `open()` / `Path.write_*` / `Path.read_*` directly in a tool.
+  `_open_file` / `_read_bytes` / `_save_bytes` in `server.py`, which call
+  `_guard_local_path`. Route any new local file access through those helpers —
+  never call `open()` / `Path.write_*` / `Path.read_*` directly in a tool. A
+  module that needs file *content* (e.g. `zipmap.py`) takes bytes from a tool
+  rather than reading the disk itself; archives are read in memory, never
+  extracted.
 - **No tool may read or write the credential store** (the per-user config dir
   from `config.config_dir()`). Tokens must stay out of any repo checkout; the
   store lives in the OS config dir and `store.json` is `.gitignore`d.
