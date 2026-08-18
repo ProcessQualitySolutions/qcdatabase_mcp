@@ -223,3 +223,4 @@ __marimo__/
 store.json
 qcdatabase-mcp/
 .qcdatabase-mcp/
+scripts/post-merge.sh
