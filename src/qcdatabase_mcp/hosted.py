@@ -37,6 +37,7 @@ QCDatabase API.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import os
@@ -231,6 +232,20 @@ def _access_token_from_whoami(token: str, data: object) -> AccessToken | None:
     )
 
 
+@dataclasses.dataclass
+class _CachedIdentity:
+    """Derived identity stored in the positive verification cache.
+
+    The raw bearer token is deliberately excluded so cache entries never expose
+    credentials, even in a heap dump or memory disclosure.
+    """
+
+    client_id: str
+    scopes: list[str]
+    subject: str
+    claims: dict | None
+
+
 def _token_cache_ttl() -> float:
     """Seconds a successful verification is trusted before re-checking whoami.
 
@@ -256,8 +271,10 @@ class QCDBTokenVerifier(TokenVerifier):
     A short in-memory cache keeps a burst of tool calls from turning into one
     ``/api/whoami/`` round-trip apiece. Failures are cached briefly too, so a
     flood of garbage tokens can't turn this endpoint into an amplification lever
-    against the API. Cache entries are keyed by a SHA-256 of the token, never the
-    token itself, so raw credentials never sit in a data structure or a heap dump.
+    against the API. Cache entries are keyed by a SHA-256 of the token and store
+    only derived identity data (:class:`_CachedIdentity`), never the raw token
+    string itself, so credentials are not retained in the cache after the initial
+    ``/api/whoami/`` call returns.
     """
 
     def __init__(
@@ -269,8 +286,9 @@ class QCDBTokenVerifier(TokenVerifier):
         self._ttl = _token_cache_ttl() if cache_ttl is None else cache_ttl
         self._neg_ttl = _token_neg_cache_ttl() if neg_cache_ttl is None else neg_cache_ttl
         self._max = max_entries
-        # key = sha256(token) -> (expires_at, AccessToken | None)
-        self._cache: dict[str, tuple[float, AccessToken | None]] = {}
+        # key = sha256(token) -> (expires_at, _CachedIdentity | None)
+        # Values are derived identity data only — the raw token is never stored.
+        self._cache: dict[str, tuple[float, _CachedIdentity | None]] = {}
         self._lock = threading.Lock()
         # One pooled client for the life of the process (never explicitly closed -
         # it lives as long as the server does). follow_redirects is safe because
@@ -287,7 +305,18 @@ class QCDBTokenVerifier(TokenVerifier):
         with self._lock:
             cached = self._cache.get(key)
             if cached and cached[0] > now:
-                return cached[1]  # may be a valid AccessToken or a cached None
+                identity = cached[1]
+                if identity is None:
+                    return None  # cached negative result
+                # Reconstruct AccessToken from cached identity + the current token.
+                return AccessToken(
+                    token=token,
+                    client_id=identity.client_id,
+                    scopes=identity.scopes,
+                    subject=identity.subject,
+                    resource=resource_url(),
+                    claims=identity.claims,
+                )
 
         access: AccessToken | None = None
         try:
@@ -303,6 +332,17 @@ class QCDBTokenVerifier(TokenVerifier):
                 data = {}
             access = _access_token_from_whoami(token, data)
 
+        # Store only derived identity, not the raw token.
+        identity_to_cache: _CachedIdentity | None = (
+            _CachedIdentity(
+                client_id=access.client_id,
+                scopes=list(access.scopes),
+                subject=access.subject,
+                claims=access.claims,
+            )
+            if access is not None
+            else None
+        )
         ttl = self._ttl if access is not None else self._neg_ttl
         with self._lock:
             if len(self._cache) >= self._max:
@@ -310,7 +350,7 @@ class QCDBTokenVerifier(TokenVerifier):
                 self._cache = {k: v for k, v in self._cache.items() if v[0] > now}
                 if len(self._cache) >= self._max:
                     self._cache.clear()
-            self._cache[key] = (now + ttl, access)
+            self._cache[key] = (now + ttl, identity_to_cache)
         return access
 
 

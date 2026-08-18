@@ -298,7 +298,7 @@ def test_verifier_caches_success_once():
     at1 = asyncio.run(v.verify_token("tok"))
     at2 = asyncio.run(v.verify_token("tok"))
     assert at1 is not None and at1.subject == "T1:U1"
-    assert at2 is at1
+    assert at2 is not None and at2.subject == at1.subject
     assert v._http.calls == 1  # second served from cache
 
 
@@ -321,6 +321,23 @@ def test_verifier_cache_key_is_hashed():
     v._http = _FakeHTTP(200, {"id": "U1", "tenant": {"id": "T1"}})
     asyncio.run(v.verify_token("RAW-TOKEN"))
     assert all("RAW-TOKEN" not in k for k in v._cache)
+
+
+def test_verifier_cache_values_contain_no_raw_token():
+    """Cache entries must store only derived identity, never the raw bearer token."""
+    v = hosted.QCDBTokenVerifier(cache_ttl=60, neg_cache_ttl=5)
+    v._http = _FakeHTTP(200, {"id": "U2", "tenant": {"id": "T2"}, "scopes": ["read"]})
+    asyncio.run(v.verify_token("SUPER-SECRET-TOKEN"))
+    for _expires, identity in v._cache.values():
+        # identity is _CachedIdentity or None — neither should contain the raw token
+        assert identity is None or not hasattr(identity, "token"), (
+            "cache entry must not be an AccessToken (which carries the raw token)"
+        )
+        if identity is not None:
+            # Confirm none of the stored string fields equal the raw token
+            assert identity.client_id != "SUPER-SECRET-TOKEN"
+            assert identity.subject != "SUPER-SECRET-TOKEN"
+            assert "SUPER-SECRET-TOKEN" not in (identity.scopes or [])
 
 
 # ---------------------------------------------------------------------------
