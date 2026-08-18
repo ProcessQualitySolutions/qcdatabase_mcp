@@ -287,12 +287,12 @@ _HOME_TEMPLATE = """<!DOCTYPE html>
               <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
             </div>
             <h2>Enterprise-grade isolation</h2>
-            <p>The MCP server acts as a secure, stateless proxy between your AI assistant and the QCDatabase API. Every session is strictly isolated to the authenticated user.</p>
+            <p>The MCP server acts as a secure, near-stateless proxy between your AI assistant and the QCDatabase API. Every session is strictly isolated to the authenticated user.</p>
           </div>
           <div class="cards three">
             <div class="card"><h3>Bring Your Own Account</h3><p>Any QCDatabase user can connect using their existing credentials. The AI's session inherits your precise role, permissions, and organization access.</p></div>
             <div class="card"><h3>Standard OAuth</h3><p>Authentication is handled directly by QCDatabase.AI. This intermediate server never sees, intercepts, or stores your passwords.</p></div>
-            <div class="card"><h3>Stateless Architecture</h3><p>No data or session tokens are persisted on this infrastructure. Your quality data flows securely in transit from the API directly to your client.</p></div>
+            <div class="card"><h3>Minimal-State Architecture</h3><p>No credentials are stored and no quality data is retained. The server remembers only your active project selection for the workday, and file transfers are staged briefly (under an hour) before automatic cleanup.</p></div>
           </div>
         </div>
       </section>
