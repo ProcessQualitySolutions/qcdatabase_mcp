@@ -16,19 +16,38 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
-dependencies = [
+# NOTE: runtime dependencies are intentionally declared under the `runtime` extra
+# below, NOT here. Some managed build environments auto-run `uv sync`, which would
+# install `[project.dependencies]` into a read-only site-packages and fail with
+# "Permission denied". Keeping this list empty makes that `uv sync` a no-op; the
+# real dependencies are installed with pip (`pip install -e '.[runtime]'`) into a
+# writable location by both the dev workflow and the deployment build command.
+dependencies = []
+
+[project.optional-dependencies]
+# Core runtime dependencies -- see the note on `dependencies` above for why they live
+# here instead of `[project.dependencies]`. Install with `pip install -e '.[runtime]'`.
+runtime = [
     "mcp>=1.10",
     "httpx>=0.27",
     # Used only for the optional --http (Streamable HTTP) transport; ships with mcp.
     "uvicorn>=0.30",
 ]
-
-[project.optional-dependencies]
 # Only needed to share hosted session state across replicas (QCDB_MCP_REDIS_URL).
 # The default in-memory store needs nothing extra.
 redis = ["redis>=5"]
-# Test suite.
-dev = ["pytest>=8"]
+# Test suite. Pulls in `runtime` (self-reference) so `pip install -e '.[dev]'`
+# also installs the core deps the tests import.
+dev = ["qcdatabase-mcp[runtime]", "pytest>=8"]
+
+[tool.uv]
+# Keep an auto-run `uv sync` from installing the root project as an *editable*
+# package, which would write an `_editable_impl_*.pth` marker into a read-only
+# site-packages and fail with "Permission denied". Combined with the empty
+# `[project.dependencies]` above, this makes that `uv sync` a harmless no-op.
+# Dependencies are installed separately with pip via the `runtime` extra; `pip`
+# (used by the dev workflow and the deployment build command) ignores this setting.
+package = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

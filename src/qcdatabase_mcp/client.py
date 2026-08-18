@@ -188,23 +188,30 @@ class QCClient:
         code = resp.status_code
         if code == 401:
             self.store.clear_token()
-            raise AuthError("Your session is no longer valid. Run 'login' again.")
-        if code == 403:
-            raise APIError(
+            exc: Exception = AuthError(
+                "Your session is no longer valid. Run 'login' again."
+            )
+        elif code == 403:
+            exc = APIError(
                 "Access denied (403). You are signed in but are not a member of "
                 f"this project, or your app lacks the needed permission. {detail}"
             )
-        if code == 404:
-            raise APIError(
+        elif code == 404:
+            exc = APIError(
                 "Not found (404). That id does not exist inside the organization "
                 f"your login is pinned to. {detail}"
             )
-        if code == 400:
-            raise APIError(
+        elif code == 400:
+            exc = APIError(
                 f"The request was rejected (400). Often this means an id belongs "
                 f"to a different project or organization. {detail}"
             )
-        raise APIError(f"QC Database returned an error ({code}). {detail}")
+        else:
+            exc = APIError(f"QC Database returned an error ({code}). {detail}")
+        # Expose the HTTP status so callers can react to specific codes (e.g. a
+        # download falling back from the base64 route to the raw export on 413).
+        exc.status_code = code  # type: ignore[attr-defined]
+        raise exc
 
     @staticmethod
     def _detail(resp: httpx.Response) -> str:
@@ -324,11 +331,19 @@ class QCClient:
                     return results  # malformed 'next' - stop rather than loop
                 continue
 
-            # Non-paginated custom shapes (e.g. {"items": [...]}, {"notes": [...]},
-            # {"schemas": [...]}, {"photos": [...]}, {"subsections": [...]}).
-            for key in ("items", "notes", "data", "schemas", "photos", "subsections"):
+            # Non-paginated custom shapes (e.g. {"items": [...]}, {"lists": [...]},
+            # {"notes": [...]}, {"schemas": [...]}, {"photos": [...]},
+            # {"subsections": [...]}).
+            for key in ("items", "lists", "notes", "data", "schemas", "photos", "subsections"):
                 if key in payload and isinstance(payload[key], list):
                     return payload[key]
+            # Fallback for an unrecognized single-key envelope like {"widgets": [...]}:
+            # return the inner list rather than treating the whole wrapper as one
+            # opaque row (which silently hides every real item and its id).
+            if len(payload) == 1:
+                (only_value,) = payload.values()
+                if isinstance(only_value, list):
+                    return only_value
             return [payload]
 
         # Fell out of the loop => still had a 'next' at the cap.

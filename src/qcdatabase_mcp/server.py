@@ -17,6 +17,7 @@ Full specification: https://qcdatabase.ai/mcp_server_spec.md
 
 from __future__ import annotations
 
+import base64
 import functools
 import json
 import mimetypes
@@ -24,9 +25,11 @@ import site
 import sys
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import quote
 
 import httpx
 from mcp.server.fastmcp import FastMCP
+from mcp.types import BlobResourceContents, EmbeddedResource, TextContent
 
 from . import BASE_URL
 from . import zipmap as zm
@@ -34,6 +37,15 @@ from .auth import AuthError, login as run_login
 from .client import APIError, QCClient
 from .config import config_dir
 from . import hosted
+
+# Hosted-mode file transfer (uploads/downloads via object storage). This optional
+# module is not part of the open-source distribution, so a checkout without it (or
+# a missing SDK) must degrade gracefully to "transfer unavailable" rather than
+# fail to import.
+try:
+    from . import _hosted_uploads as _uploads
+except Exception:  # pragma: no cover - absence is a valid deployment shape
+    _uploads = None
 
 # The server runs in one of two modes, decided once at startup from the
 # environment (the CLI sets these vars from its flags before importing us):
@@ -68,7 +80,7 @@ if hosted.hosted_enabled():
     # Public, unauthenticated pages: the home page (how to connect) and /health.
     from .pages import register_pages
 
-    register_pages(mcp)
+    register_pages(mcp, uploads_enabled=_uploads is not None)
 else:
     mcp = FastMCP("qcdatabase")
 
@@ -143,29 +155,31 @@ def _name_of(item: dict[str, Any]) -> str:
     return "(unnamed)"
 
 
-def _line(item: dict[str, Any]) -> str:
-    """One readable line for a resource in a list."""
-    parts = [_name_of(item)]
+def _render_row(index: int, item: Any) -> str:
+    """Render one list row, passing every field through unmolested.
+
+    A short 'name [status]' header keeps the list scannable; beneath it the FULL
+    record the API returned is dumped via _pretty, so no field is hidden from the
+    agent. _pretty only length-caps very long strings / very long nested arrays
+    (leaving a marker) to bound transport size - it never drops a field."""
+    if not isinstance(item, dict):
+        return f"{index}. {_fmt_value(item)}"
+    head = _name_of(item)
     if item.get("status"):
-        parts.append(f"[{item['status']}]")
-    bits = " ".join(parts)
-    out = bits
-    if item.get("id"):
-        out += f"\n   id: {item['id']}"
-    if item.get("web_url"):
-        out += f"\n   link: {item['web_url']}"
-    return out
+        head += f" [{item['status']}]"
+    return f"{index}. {head}\n{_indent(_pretty(item), 3)}"
 
 
 def _render_list(title: str, items: list[Any], empty: str = "Nothing found.") -> str:
+    """Render any list of API records, dumping EVERY field of every row (see
+    _render_row). This is the default for browse/list tools: QC Database treats data
+    transparency as a design goal, so only genuinely specialized tools (summaries,
+    reports, the manual reader) should filter fields instead of calling this."""
     if not items:
         return f"{title}\n{empty}"
-    lines = [title, f"({len(items)} found)", ""]
+    lines = [_DATA_FENCE, "", title, f"({len(items)} found)", ""]
     for i, it in enumerate(items, 1):
-        if isinstance(it, dict):
-            lines.append(f"{i}. {_line(it)}")
-        else:
-            lines.append(f"{i}. {it}")
+        lines.append(_render_row(i, it))
     return "\n".join(lines)
 
 
@@ -207,12 +221,7 @@ def _render_search(title: str, payload: Any) -> str:
             continue
         sfx = _sim_suffix(it.get("similarity"))
         lines.append(f"{i}. {_name_of(it)}{sfx}")
-        if it.get("status"):
-            lines.append(f"   status: {it['status']}")
-        if it.get("id"):
-            lines.append(f"   id: {it['id']}")
-        if it.get("web_url"):
-            lines.append(f"   link: {it['web_url']}")
+        lines.append(_indent(_pretty(it), 3))
     return "\n".join(lines)
 
 
@@ -272,47 +281,6 @@ def _schema_field_names(definition: Any) -> list[str]:
     return []
 
 
-def _ref_name(ref: Any) -> str:
-    """Pull a display name out of a nested {id, name} ref (or return '')."""
-    if isinstance(ref, dict):
-        return str(ref.get("name") or ref.get("full_name") or "").strip()
-    return ""
-
-
-def _render_locks(title: str, items: list[Any]) -> str:
-    """Render quality-hold locks: hold type, state, target, and who it is on."""
-    if not items:
-        return f"{title}\nNo locks."
-    lines = [title, f"({len(items)} found)", ""]
-    for i, it in enumerate(items, 1):
-        if not isinstance(it, dict):
-            lines.append(f"{i}. {it}")
-            continue
-        type_name = _ref_name(it.get("lock_type")) or "(lock)"
-        status = it.get("status", "")
-        head = f"{i}. {type_name}"
-        if status:
-            head += f" [{status}]"
-        lines.append(head)
-        target = ""
-        if it.get("map_item"):
-            target = f"map item {it['map_item']}"
-        elif it.get("itp_line_item"):
-            target = f"ITP line item {it['itp_line_item']}"
-        if target:
-            lines.append(f"   on: {target}")
-        assignee = _ref_name(it.get("assigned_user"))
-        atype = _ref_name(it.get("assigned_user_type"))
-        who = assignee or (f"user type: {atype}" if atype else "")
-        if assignee and atype:
-            who = f"{assignee} (user type: {atype})"
-        if who:
-            lines.append(f"   assigned to: {who}")
-        if it.get("id"):
-            lines.append(f"   id: {it['id']}")
-    return "\n".join(lines)
-
-
 def _pretty(obj: Any) -> str:
     """Compact, readable JSON for a single resource, with huge blobs trimmed."""
     def trim(value: Any) -> Any:
@@ -321,10 +289,72 @@ def _pretty(obj: Any) -> str:
         if isinstance(value, dict):
             return {k: trim(v) for k, v in value.items()}
         if isinstance(value, list):
-            return [trim(v) for v in value[:50]]
+            trimmed = [trim(v) for v in value[:50]]
+            if len(value) > 50:
+                # Leave a visible marker instead of silently dropping the tail -
+                # bounding size must never hide that data exists (transparency).
+                trimmed.append(f"... ({len(value) - 50} more items truncated)")
+            return trimmed
         return value
 
     return json.dumps(trim(obj), indent=2, ensure_ascii=False)
+
+
+def _indent(text: str, spaces: int) -> str:
+    """Indent every non-empty line of *text* by *spaces* spaces."""
+    pad = " " * spaces
+    return "\n".join(pad + line if line else line for line in text.split("\n"))
+
+
+def _fmt_value(value: Any) -> str:
+    """One-line rendering of a stored field value (compact JSON for containers),
+    trimmed so a single oversized field can't bloat a tool reply."""
+    rendered = (
+        json.dumps(value, ensure_ascii=False)
+        if isinstance(value, (dict, list))
+        else str(value)
+    )
+    return rendered[:600] + "... (truncated)" if len(rendered) > 600 else rendered
+
+
+def _render_list_items(payload: Any) -> str:
+    """Render one list's entries, passing every field through unmolested: each
+    entry's FULL record (including its 'data' field values, e.g. a welder's
+    full_name) plus the list's own field-definition schema. Accepts the
+    ``ListItemsResponse`` envelope ({list_schema, schema, items, web_url}) or, as a
+    fallback, a bare list of items."""
+    if isinstance(payload, dict):
+        items = payload.get("items")
+        if not isinstance(items, list):
+            # Tolerate DRF-style pagination drift ({"results": [...], "next": ...})
+            # so an envelope-shape change can't silently masquerade as an empty list.
+            items = payload.get("results")
+        items = items if isinstance(items, list) else []
+        list_schema = payload.get("schema")
+    elif isinstance(payload, list):
+        items, list_schema = payload, None
+    else:
+        items, list_schema = [], None
+
+    has_schema = list_schema not in (None, "", {}, [])
+    if not items and not has_schema:
+        return "This list has no items."
+
+    # The list's field definitions and each entry's data are user-authored; fence
+    # them as data. Both are dumped in full - nothing is filtered out.
+    out: list[str] = [_DATA_FENCE, ""]
+    if has_schema:
+        out.append("List field schema:")
+        out.append(_indent(_pretty(list_schema), 3))
+        out.append("")
+    if not items:
+        out.append("This list has no items.")
+        return "\n".join(out)
+    out.append(f"List items ({len(items)} found):")
+    out.append("")
+    for i, it in enumerate(items, 1):
+        out.append(_render_row(i, it))
+    return "\n".join(out)
 
 
 def _parse_json_arg(name: str, raw: str) -> Any:
@@ -420,7 +450,18 @@ def _guard_local_path(path: Path, *, write: bool) -> Path:
     return resolved
 
 
+# Shown when a file tool runs on a hosted server that has no transfer provider
+# wired in (e.g. an open-source checkout without the optional hosted module).
+_HOSTED_TRANSFER_OFF = "File uploads and downloads are not enabled on this server."
+
+
 def _open_file(path: str) -> tuple[str, Any, str]:
+    # Hosted mode shares no filesystem with the caller: 'path' is an upload handle
+    # from begin_upload, and the bytes are pulled back from object storage.
+    if hosted.hosted_enabled():
+        if _uploads is None:
+            raise ValueError(_HOSTED_TRANSFER_OFF)
+        return _uploads.resolve_upload(path)
     safe = _guard_local_path(Path(path), write=False)
     if not safe.is_file():
         raise FileNotFoundError(f"No file at: {path}")
@@ -436,11 +477,136 @@ def _read_bytes(path: str | Path) -> bytes:
     return safe.read_bytes()
 
 
-def _save_bytes(save_path: str, content: bytes) -> Path:
+def _save_bytes(save_path: str, content: bytes) -> Any:
+    # Hosted mode cannot write to the caller's disk: stash the payload in object
+    # storage and return a download URL. 'save_path' only supplies the file name.
+    if hosted.hosted_enabled():
+        if _uploads is None:
+            raise ValueError(_HOSTED_TRANSFER_OFF)
+        return _uploads.store_download(content, save_path)
     safe = _guard_local_path(Path(save_path), write=True)
     safe.parent.mkdir(parents=True, exist_ok=True)
     safe.write_bytes(content)
     return safe
+
+
+# A remote/agent client shares no filesystem with a hosted server and may not be
+# able to reach any side-channel host, so a downloaded file is returned *through
+# the MCP connection itself* as an embedded resource. Above this size that is
+# impractical (it would balloon a single protocol message), so we fall back to a
+# time-limited link a human can open. Local (stdio) downloads still write to disk.
+_INLINE_DOWNLOAD_CAP = 25 * 1024 * 1024  # 25 MB
+
+
+def _download_name(name_hint: str) -> str:
+    """A bare, safe filename for a returned download (never a directory path)."""
+    base = Path((name_hint or "").strip()).name or "download"
+    return base.replace('"', "_")
+
+
+def _deliver_download(content: bytes, name_hint: str) -> Any:
+    """Hand a downloaded payload back in the way that fits the transport.
+
+    * Local (stdio) server: write it to 'name_hint' on disk (a real path) and say
+      where it landed - the historical behavior for a user on their own machine.
+    * Hosted server: return the bytes over the MCP channel itself - a short text
+      summary plus an embedded file resource the client can save - so an agent or
+      any remote client actually receives the file without needing to reach a
+      side-channel host. Oversized payloads fall back to a download link.
+    """
+    if not hosted.hosted_enabled():
+        out = _save_bytes(name_hint, content)
+        return f"Saved to: {out} ({len(content)} bytes)."
+
+    name = _download_name(name_hint)
+    ctype = mimetypes.guess_type(name)[0] or "application/octet-stream"
+    if len(content) > _INLINE_DOWNLOAD_CAP:
+        where = _save_bytes(name, content)  # provider -> a GET link (raises if off)
+        return (
+            f"'{name}' is {len(content)} bytes - too large to return inline over "
+            f"MCP. A person can download it from this link (it expires shortly):\n"
+            f"    {where}"
+        )
+    return [
+        TextContent(
+            type="text",
+            text=f"Downloaded '{name}' ({len(content)} bytes, {ctype}). "
+            "It is attached as a file resource - save it to keep it.",
+        ),
+        EmbeddedResource(
+            type="resource",
+            resource=BlobResourceContents(
+                uri=f"qcdb://file/{quote(name, safe='')}",
+                mimeType=ctype,
+                blob=base64.b64encode(content).decode("ascii"),
+            ),
+        ),
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Base64 file-envelope downloads (proxy-safe) with raw-binary fallback
+# ---------------------------------------------------------------------------
+# Some files live in object storage, and a signed object-storage link cannot be
+# fetched from the hosted server (it gets a proxy 403). The API therefore exposes
+# download endpoints that return the file as base64 inside a JSON envelope, so one
+# authenticated call is enough. We prefer those and fall back to the raw-binary
+# export endpoint when the envelope route is absent (older API: 404/405) or the
+# file is over the envelope's size cap (413).
+def _download_b64(path: str, **params: Any) -> dict[str, Any]:
+    """GET a base64 file-envelope endpoint and return its decoded payload.
+
+    Returns a dict with 'content' (bytes), 'filename', and - for image endpoints -
+    integer 'width'/'height'. A malformed envelope raises APIError; HTTP errors
+    from the client propagate unchanged (carrying '.status_code')."""
+    env = client().get(path, **params)
+    if not isinstance(env, dict) or not env.get("success"):
+        raise APIError(f"Unexpected download response from {path}.")
+    data = env.get("data")
+    if env.get("encoding") != "base64" or not isinstance(data, str):
+        raise APIError(f"Download response from {path} was not base64 as expected.")
+    try:
+        content = base64.b64decode(data, validate=True)
+    except (ValueError, TypeError) as exc:
+        raise APIError(f"Could not decode the file from {path}: {exc}") from exc
+    return {
+        "content": content,
+        "filename": env.get("filename") or "",
+        "width": env.get("width"),
+        "height": env.get("height"),
+    }
+
+
+def _download_file(
+    b64_path: str, export_path: str, save_path: str, fallback_name: str, **params: Any
+) -> Any:
+    """Download a file, preferring the proxy-safe base64 endpoint and falling back
+    to the raw-binary export endpoint when the base64 route is missing (404/405) or
+    the file is over the base64 size cap (413)."""
+    try:
+        env = _download_b64(b64_path, **params)
+        content, name = env["content"], env["filename"]
+    except APIError as exc:
+        if getattr(exc, "status_code", None) not in (404, 405, 413):
+            raise
+        content, name = client().download(export_path, **params), ""
+    return _deliver_download(content, save_path or name or fallback_name)
+
+
+def _deliver_image(env: dict[str, Any], name_hint: str) -> Any:
+    """Deliver a canvas image plus the pixel size and coordinate note an HTML /
+    overlay builder needs to place map items without rescaling."""
+    w, h = env.get("width"), env.get("height")
+    dims = f"{w}x{h} px" if w and h else "unknown size"
+    note = (
+        f"Canvas image ({dims}). Map-item x_position/y_position are absolute pixels "
+        "in this image's top-left-origin space - drop the image into your HTML and "
+        "place items at those coordinates with no rescaling."
+    )
+    delivered = _deliver_download(env["content"], name_hint)
+    if isinstance(delivered, list):
+        return [TextContent(type="text", text=note), *delivered]
+    return f"{note}\n{delivered}"
 
 
 def _zipmap_members(file_path: str) -> tuple[dict[str, bytes], bool]:
@@ -668,23 +834,17 @@ def list_lists() -> str:
 @mcp.tool()
 @_safe
 def list_list_items(list_id: str) -> str:
-    """Read the entries in one controlled-vocabulary list. Each entry includes a
-    'pseudo_code' pill token - paste that verbatim into a map item field so the
-    value stays linked to the canonical list entry instead of being free text."""
+    """Read the entries in one controlled-vocabulary list, INCLUDING each entry's
+    schema field values (its 'data', e.g. a welder's full_name) and the list's own
+    field definitions. Use these to answer questions about specific entries (e.g.
+    whether a named person is on a list). Each entry also includes a 'pseudo_code'
+    pill token - paste that verbatim into a map item field so the value stays linked
+    to the canonical list entry instead of being free text."""
     pid = require_project()
-    data = client().get_all(f"/api/lists/projects/{pid}/{list_id}/items/")
-    if not data:
-        return "This list has no items."
-    lines = [f"List items ({len(data)} found):", ""]
-    for i, it in enumerate(data, 1):
-        name = _name_of(it) if isinstance(it, dict) else str(it)
-        lines.append(f"{i}. {name}")
-        if isinstance(it, dict):
-            if it.get("id"):
-                lines.append(f"   id: {it['id']}")
-            if it.get("pseudo_code"):
-                lines.append(f"   pill: {it['pseudo_code']}")
-    return "\n".join(lines)
+    # Fetch the full envelope (not get_all) so the list's field-definition 'schema'
+    # survives - get_all unwraps {"items": [...]} and would drop it.
+    payload = client().get(f"/api/lists/projects/{pid}/{list_id}/items/")
+    return _render_list_items(payload)
 
 
 @mcp.tool()
@@ -815,11 +975,13 @@ def list_document_folders() -> str:
 @mcp.tool()
 @_safe
 def list_form_schemas() -> str:
-    """List the custom inspection-form schemas defined for this project. Use a
-    schema's id with 'create_form_submission' to start filling that form out."""
+    """List the custom inspection-form schemas defined for this project, INCLUDING
+    each form's field definitions (name, type, whether required, and any fixed
+    options). Read the fields here first, then pass a schema's id - plus a 'data'
+    object keyed by those fields - to 'create_form_submission' to fill it out."""
     pid = require_project()
     data = client().get_all(f"/api/projects/{pid}/schemas/forms/")
-    return _render_list("Form schemas:", data)
+    return _render_list("Form schemas:", data, empty="No form schemas are defined for this project.")
 
 
 # ===========================================================================
@@ -1012,7 +1174,8 @@ def get_document(document_id: str) -> str:
 def set_document_extracted_data(document_id: str, extracted_data: str) -> str:
     """Write structured fields back onto a document (used after you run your own
     'bring your own AI' extraction). 'extracted_data' is a JSON object string
-    matching the folder's schema."""
+    matching the folder's schema - call 'list_document_folders' to see each
+    folder's extraction schema (the field names to use as keys here)."""
     payload = {"extracted_data": _parse_json_arg("extracted_data", extracted_data)}
     result = client().post(f"/api/documents/{document_id}/extracted-data/", json=payload)
     return f"Extracted data saved on document {document_id}.\n\n{_pretty(result)}"
@@ -1039,16 +1202,22 @@ def upload_document_version(document_id: str, file_path: str, do_not_extract: bo
     return f"Uploaded new version '{name}' of document {document_id}.\n\n{_pretty(result)}"
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 @_safe
-def download_document(document_id: str, save_path: str) -> str:
-    """Download a document's original uploaded file to a local path."""
+def download_document(document_id: str, save_path: str = "") -> Any:
+    """Download a document's original uploaded file.
+
+    On the local (stdio) server it is written to 'save_path' on your disk. On the
+    hosted server it is returned to you inline over the MCP connection (save it
+    from the attached file resource); there 'save_path' is optional and only names
+    the file."""
     pid = require_project()
-    content = client().download(
-        f"/api/documents/projects/{pid}/document/{document_id}/export/"
+    return _download_file(
+        f"/api/documents/projects/{pid}/document/{document_id}/download/",
+        f"/api/documents/projects/{pid}/document/{document_id}/export/",
+        save_path,
+        f"document-{document_id}",
     )
-    out = _save_bytes(save_path, content)
-    return f"Saved document {document_id} to: {out} ({len(content)} bytes)."
 
 
 # ===========================================================================
@@ -1220,34 +1389,78 @@ def upload_large_format_drawing_version(lfd_id: str, file_path: str, do_not_extr
     return f"Uploaded new version '{name}' of large-format drawing {lfd_id}.\n\n{_pretty(result)}"
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 @_safe
-def export_drawing(drawing_id: str, save_path: str, variant: str = "clean", schema_id: str = "") -> str:
-    """Render a drawing to a PDF and save it locally. variant='clean' (default) is
-    the bare drawing; variant='map' overlays its map items - give a schema_id to
-    overlay only that schema's items, or omit it for the combined map of all."""
+def export_drawing(drawing_id: str, save_path: str = "", variant: str = "clean", schema_id: str = "") -> Any:
+    """Render a drawing to a PDF. variant='clean' (default) is the bare drawing;
+    variant='map' overlays its map items - give a schema_id to overlay only that
+    schema's items, or omit it for the combined map of all.
+
+    On the local (stdio) server the PDF is written to 'save_path' on disk; on the
+    hosted server it is returned inline over the MCP connection (save it from the
+    attached file resource) and 'save_path' only names the file."""
     pid = require_project()
-    content = client().download(
+    return _download_file(
+        f"/api/drawings/projects/{pid}/drawing/{drawing_id}/download/",
         f"/api/drawings/projects/{pid}/drawing/{drawing_id}/export/",
+        save_path,
+        f"drawing-{drawing_id}-{variant}.pdf",
         variant=variant or None,
         schema_id=schema_id or None,
     )
-    out = _save_bytes(save_path, content)
-    return f"Saved drawing {drawing_id} ({variant}) to: {out} ({len(content)} bytes)."
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 @_safe
-def export_large_format_drawing(lfd_id: str, save_path: str, variant: str = "clean") -> str:
-    """Render a large-format drawing to a PDF and save it locally. variant='clean'
-    (default) is the bare drawing; variant='flagged' includes the flagged overlay."""
+def export_large_format_drawing(lfd_id: str, save_path: str = "", variant: str = "clean") -> Any:
+    """Render a large-format drawing to a PDF. variant='clean' (default) is the bare
+    drawing; variant='flagged' includes the flagged overlay.
+
+    On the local (stdio) server the PDF is written to 'save_path' on disk; on the
+    hosted server it is returned inline over the MCP connection (save it from the
+    attached file resource) and 'save_path' only names the file."""
     pid = require_project()
-    content = client().download(
+    return _download_file(
+        f"/api/drawings/projects/{pid}/large-format/{lfd_id}/download/",
         f"/api/drawings/projects/{pid}/large-format/{lfd_id}/export/",
+        save_path,
+        f"large-format-{lfd_id}-{variant}.pdf",
         variant=variant or None,
     )
-    out = _save_bytes(save_path, content)
-    return f"Saved large-format drawing {lfd_id} ({variant}) to: {out} ({len(content)} bytes)."
+
+
+@mcp.tool(structured_output=False)
+@_safe
+def get_drawing_image(drawing_id: str, save_path: str = "") -> Any:
+    """Get a drawing's rendered canvas image (PNG) - the raster you overlay map
+    items onto when building an HTML view. The response states the image's pixel
+    width/height; a map item's x_position/y_position are absolute pixels in that
+    same top-left-origin space, so they drop straight onto the image with no
+    rescaling.
+
+    On the local (stdio) server the image is written to 'save_path' on disk; on the
+    hosted server it is returned inline over the MCP connection (save it from the
+    attached file resource) and 'save_path' only names the file."""
+    pid = require_project()
+    env = _download_b64(f"/api/drawings/projects/{pid}/drawing/{drawing_id}/image/")
+    return _deliver_image(env, save_path or env["filename"] or f"drawing-{drawing_id}.png")
+
+
+@mcp.tool(structured_output=False)
+@_safe
+def get_large_format_drawing_image(lfd_id: str, save_path: str = "") -> Any:
+    """Get a large-format drawing's rendered canvas image (PNG) - the raster you
+    overlay map items onto when building an HTML view. The response states the
+    image's pixel width/height; a map item's x_position/y_position are absolute
+    pixels in that same top-left-origin space, so they drop straight onto the image
+    with no rescaling.
+
+    On the local (stdio) server the image is written to 'save_path' on disk; on the
+    hosted server it is returned inline over the MCP connection (save it from the
+    attached file resource) and 'save_path' only names the file."""
+    pid = require_project()
+    env = _download_b64(f"/api/drawings/projects/{pid}/large-format/{lfd_id}/image/")
+    return _deliver_image(env, save_path or env["filename"] or f"large-format-{lfd_id}.png")
 
 
 # ===========================================================================
@@ -1517,15 +1730,7 @@ def list_repair_codes() -> str:
     """List the repair codes used when adding a repair to a map item: R (Repair),
     C (Cut-out), A (Adjustment), SC (Scope Change), RW (Rework)."""
     data = client().get_all("/api/mapping/items/repair-codes/")
-    if not data:
-        return "No repair codes found."
-    lines = ["Repair codes:", ""]
-    for it in data:
-        if isinstance(it, dict):
-            lines.append(f"  {it.get('code', '?')} - {it.get('label', '')}")
-        else:
-            lines.append(f"  {it}")
-    return "\n".join(lines)
+    return _render_list("Repair codes:", data, empty="No repair codes found.")
 
 
 @mcp.tool()
@@ -1794,17 +1999,22 @@ def get_fillable_template(folder_id: str) -> str:
     return _pretty(client().get(f"/api/documents/projects/{pid}/fillable-templates/{folder_id}/"))
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 @_safe
-def download_fillable_template(folder_id: str, save_path: str) -> str:
-    """Download the blank fillable PDF for a folder to a local path so you can
-    fill it in (ideally flatten it) before submitting."""
+def download_fillable_template(folder_id: str, save_path: str = "") -> Any:
+    """Download the blank fillable PDF for a folder so you can fill it in (ideally
+    flatten it) before submitting.
+
+    On the local (stdio) server it is written to 'save_path' on disk; on the hosted
+    server it is returned inline over the MCP connection (save it from the attached
+    file resource), and 'save_path' only names the file. To send the filled PDF
+    back, stage it with 'begin_upload' + 'put_upload' (or the upload URL), then
+    call 'submit_fillable_template'."""
     pid = require_project()
     content = client().download(
         f"/api/documents/projects/{pid}/fillable-templates/{folder_id}/download/"
     )
-    out = _save_bytes(save_path, content)
-    return f"Saved blank template to: {out} ({len(content)} bytes)."
+    return _deliver_download(content, save_path or f"template-{folder_id}.pdf")
 
 
 @mcp.tool()
@@ -1863,9 +2073,11 @@ def create_form_submission(
     report_date: str = "",
     data: str = "",
 ) -> str:
-    """Start a new inspection-form submission from a form schema id. 'data' is an
-    optional JSON object of initial field values. It is created as a draft; use
-    'complete_form_submission' to lock it once finished."""
+    """Start a new inspection-form submission from a form schema id. Call
+    'list_form_schemas' first to read that schema's field definitions, then pass
+    'data' as an (optional) JSON object of initial field values keyed by those
+    fields. It is created as a draft; use 'complete_form_submission' to lock it
+    once finished."""
     pid = require_project()
     payload: dict[str, Any] = {"form_schema": form_schema}
     if title:
@@ -1928,6 +2140,12 @@ def complete_form_submission(submission_id: str) -> str:
 # ===========================================================================
 # Notes
 # ===========================================================================
+# The QC Database API does not yet constrain note severity server-side, so we
+# validate the vocabulary here to give callers a clear, stable set of values.
+# Remove this local check once the API enforces the same enum natively.
+_NOTE_SEVERITIES = ("severe_issue", "issue", "questionable", "neutral", "positive")
+
+
 @mcp.tool()
 @_safe
 def create_note(
@@ -1939,11 +2157,18 @@ def create_note(
 ) -> str:
     """Create a note (observation, action item, issue) on the current project.
     Optionally make it private, set a severity, anchor it to a page_url, and
-    assign (@mention) it to a project member by their user id."""
+    assign (@mention) it to a project member by their user id. severity, when
+    given, must be one of: severe_issue, issue, questionable, neutral, positive."""
     pid = require_project()
     payload: dict[str, Any] = {"content": content, "is_private": is_private}
     if severity:
-        payload["severity"] = severity
+        sev = severity.strip().lower()
+        if sev not in _NOTE_SEVERITIES:
+            raise ValueError(
+                f"Unknown severity '{severity}'. Use one of: "
+                f"{', '.join(_NOTE_SEVERITIES)}."
+            )
+        payload["severity"] = sev
     if page_url:
         payload["page_url"] = page_url
     if assigned_to:
@@ -2232,7 +2457,7 @@ def list_locks(status: str = "", item_type: str = "", item_id: str = "") -> str:
     elif item_type:
         _check_lock_item_type(item_type)  # validate even without an id
     data = client().get_all(f"/api/locks/projects/{pid}/locks/", **params)
-    return _render_locks("Quality-hold locks:", data)
+    return _render_list("Quality-hold locks:", data, empty="No locks.")
 
 
 @mcp.tool()
@@ -2576,32 +2801,46 @@ def list_shipper_line_items(shipper_id: str, search: str = "") -> str:
 # ===========================================================================
 # QR codes
 # ===========================================================================
-@mcp.tool()
+@mcp.tool(structured_output=False)
 @_safe
-def generate_qr_code(url: str, save_path: str = "") -> str:
+def generate_qr_code(url: str, save_path: str = "") -> Any:
     """Generate a QR code (and short URL) for an internal QC Database app path,
     e.g. url='/projects/<id>/'. Only internal app paths are allowed. Returns the
-    short URL; if save_path is given, also decodes and saves the QR image there."""
+    short URL. The QR image is saved to 'save_path' on the local server, or (on the
+    hosted server) returned inline over the MCP connection as an image resource."""
     proj = client().store.get_active_project() or {}
     payload: dict[str, Any] = {"url": url}
     if proj.get("id"):
         payload["project_id"] = proj["id"]
     result = client().post("/api/qr/generate/", json=payload)
 
-    saved = ""
-    if save_path and isinstance(result, dict):
-        img = result.get("qr_image_base64") or result.get("qr_image")
-        if isinstance(img, str) and img:
-            import base64
+    text = f"QR code generated.\n\n{_pretty(result)}"
+    img = (result.get("qr_image_base64") or result.get("qr_image")) if isinstance(result, dict) else None
+    if not (isinstance(img, str) and img):
+        return text
+    try:
+        # A data: URI without a comma would IndexError - keep it inside the try.
+        b64 = img.split(",", 1)[1] if img.startswith("data:") else img
+        image_bytes = base64.b64decode(b64)
+    except (ValueError, TypeError, IndexError):
+        return f"{text}\n(Could not decode the QR image from the response.)"
 
-            try:
-                # A data: URI without a comma would IndexError - keep it inside.
-                b64 = img.split(",", 1)[1] if img.startswith("data:") else img
-                out = _save_bytes(save_path, base64.b64decode(b64))
-                saved = f"\nSaved QR image to: {out}."
-            except (ValueError, TypeError, IndexError):
-                saved = "\n(Could not decode the QR image from the response.)"
-    return f"QR code generated.{saved}\n\n{_pretty(result)}"
+    if hosted.hosted_enabled():
+        return [
+            TextContent(type="text", text=text),
+            EmbeddedResource(
+                type="resource",
+                resource=BlobResourceContents(
+                    uri="qcdb://file/qr-code.png",
+                    mimeType="image/png",
+                    blob=base64.b64encode(image_bytes).decode("ascii"),
+                ),
+            ),
+        ]
+    if save_path:
+        out = _save_bytes(save_path, image_bytes)
+        return f"{text}\nSaved QR image to: {out}."
+    return text
 
 
 # ===========================================================================
@@ -2688,6 +2927,13 @@ def list_user_manual() -> str:
         lines.append("")
     lines.append("Ask a question with 'search_user_manual' to read the relevant articles.")
     return "\n".join(lines)
+
+
+# Attach the hosted upload/download bridge (begin_upload tool + transfer routes).
+# Done here, after _safe and the tools are defined, so the provider can reuse the
+# same error-to-text wrapper without importing this module (circular import).
+if hosted.hosted_enabled() and _uploads is not None:
+    _uploads.register(mcp, _safe)
 
 
 def run() -> None:

@@ -196,7 +196,13 @@ complete.
   original, and set extracted data. Fillable-PDF templates live under
   `/api/documents/projects/{project_id}/fillable-templates/…`.
 - **Drawings:** `/api/drawings/…` — isometric and large-format uploads, versions,
-  and rendered exports (clean, map-overlay, or flagged variants).
+  rendered exports (clean, map-overlay, or flagged variants), and rendered **canvas
+  images** (PNG). File downloads prefer a proxy-safe base64 file-envelope endpoint
+  (a signed object-storage link cannot be fetched from a hosted server) and fall
+  back to the raw-binary export for oversized files. A canvas image reports its
+  pixel width/height, and a map item's `x_position`/`y_position` are absolute pixels
+  in that same top-left-origin space — so the image can be dropped into HTML with
+  items placed at those coordinates with no rescaling.
 - **Map items:** `/api/mapping/…` — pins (welds, flanges, fittings) on drawings,
   with custom schema data, completion/acceptance buy-off, and repair records
   (`repair-codes`, `repair`). Fetch the map item **schema first** (see §3) and

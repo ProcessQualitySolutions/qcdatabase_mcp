@@ -60,14 +60,14 @@ _HOME_TEMPLATE = """<!DOCTYPE html>
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1" />
-    <title>QCDatabase MCP — Remote AI Infrastructure</title>
+    <title>QCDatabase MCP: Remote AI Infrastructure</title>
     <meta name="description" content="Connect your AI assistant to QCDatabase. Secure, remote Model Context Protocol (MCP) server for construction quality control data." />
     <meta name="robots" content="index, follow" />
-    <meta property="og:title" content="QCDatabase MCP — Remote AI Infrastructure" />
+    <meta property="og:title" content="QCDatabase MCP: Remote AI Infrastructure" />
     <meta property="og:description" content="Connect your AI assistant to QCDatabase. Secure, remote Model Context Protocol (MCP) server for construction quality control data." />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="QCDatabase MCP — Remote AI Infrastructure" />
+    <meta name="twitter:title" content="QCDatabase MCP: Remote AI Infrastructure" />
     <meta name="twitter:description" content="Connect your AI assistant to QCDatabase. Secure, remote Model Context Protocol (MCP) server for construction quality control data." />
     <link rel="icon" type="image/png" href="data:image/png;base64,__ICON_B64__" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -225,8 +225,8 @@ _HOME_TEMPLATE = """<!DOCTYPE html>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
           Remote Infrastructure
           </span>
-          <h1>Connect Claude to your QCDatabase.</h1>
-          <p class="lede">A hosted, remote Model Context Protocol (MCP) server enabling AI assistants to securely read projects, quality data, and references from anywhere — including mobile.</p>
+          <h1>Connect your AI tools to QC Database.</h1>
+          <p class="lede">A hosted, remote Model Context Protocol (MCP) server enabling AI assistants to securely read projects, quality data, and references from anywhere, including mobile.</p>
           <div class="btns">
             <a class="btn btn-primary" href="#connect">How to connect
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
@@ -245,7 +245,7 @@ _HOME_TEMPLATE = """<!DOCTYPE html>
             <div class="steps">
               <div class="step">
                 <div class="step-n">1</div>
-                <div><h3>Open your AI Client</h3><p>In the Claude desktop or mobile app, navigate to <span class="kbd">Settings &gt; Connectors</span>.</p></div>
+                <div><h3>Open your AI Client</h3><p>In the Claude desktop or mobile app, navigate to <span class="kbd">Customize &gt; Connectors</span>.</p></div>
               </div>
               <div class="step">
                 <div class="step-n">2</div>
@@ -302,24 +302,56 @@ _HOME_TEMPLATE = """<!DOCTYPE html>
         <div class="wrap">
           <div style="margin-bottom:3.5rem">
             <h2>Capabilities</h2>
-            <p style="color:var(--muted);font-size:1.125rem;max-width:40rem;margin:0">Once connected, your AI assistant can seamlessly query your organization's quality control data to assist with analysis, reporting, and reference checks.</p>
+            <p style="color:var(--muted);font-size:1.125rem;max-width:46rem;margin:0">Once connected, your AI assistant works the project end to end: reading, creating, and updating records across the whole quality workflow, from desktop or mobile. More than 80 tools span the areas below, plus notes and photos on supported records.</p>
           </div>
           <div class="cards four">
             <div class="card">
-              <div class="cap-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 18v-2a4 4 0 0 1 4-4h12a4 4 0 0 1 4 4v2"/><path d="M10 6a2 2 0 1 1 4 0v2h-4z"/><path d="M4 12V9a2 2 0 0 1 2-2h1"/><path d="M20 12V9a2 2 0 0 0-2-2h-1"/></svg></div>
-              <h3>Active Projects</h3><p>Browse your available projects and securely set an active context for subsequent AI queries.</p>
+              <div class="cap-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 17a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3.9a2 2 0 0 1-1.69-.9l-.81-1.2a2 2 0 0 0-1.67-.9H8a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2Z"/><path d="M2 8v11a2 2 0 0 0 2 2h14"/></svg></div>
+              <h3>Projects &amp; Access</h3><p>List your organizations and projects, set the active project for the session, and see current team members.</p>
             </div>
             <div class="card">
-              <div class="cap-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg></div>
-              <h3>Quality Records</h3><p>Read and analyze quality records, mappings, and inspection data instantly.</p>
+              <div class="cap-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m7.5 4.27 9 5.15"/><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></svg></div>
+              <h3>Jobs &amp; Test Packages</h3><p>Browse and create the jobs, test packages, and line specifications that define your project's scope.</p>
+            </div>
+            <div class="card">
+              <div class="cap-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"/><line x1="8" y1="2" x2="8" y2="18"/><line x1="16" y1="6" x2="16" y2="22"/></svg></div>
+              <h3>Drawings</h3><p>Upload and version isometrics and large-format P&amp;IDs, read AI-extracted sheet data, and export rendered PDFs.</p>
+            </div>
+            <div class="card">
+              <div class="cap-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="3"/></svg></div>
+              <h3>Map Items</h3><p>Place welds, flanges, and fittings on drawings (one at a time or in bulk up to 500), then mark complete, accept, or log repairs.</p>
+            </div>
+            <div class="card">
+              <div class="cap-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg></div>
+              <h3>Documents &amp; Records</h3><p>Upload, version, and download MTRs, NDE reports, and certificates, and read their AI-extracted fields.</p>
+            </div>
+            <div class="card">
+              <div class="cap-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="m9 14 2 2 4-4"/></svg></div>
+              <h3>Inspection Forms &amp; Templates</h3><p>Start, fill, and complete custom inspection forms, or download fillable PDF templates with project autofill and submit them back.</p>
+            </div>
+            <div class="card">
+              <div class="cap-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 17 2 2 4-4"/><path d="m3 7 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/></svg></div>
+              <h3>ITP Line Items</h3><p>Read, create, and update Inspection &amp; Test Plan steps with acceptance criteria, then mark them complete or accepted.</p>
+            </div>
+            <div class="card">
+              <div class="cap-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></div>
+              <h3>Quality Holds</h3><p>Place, assign, and clear witness and hold points (fit-up, tack-up, cleanliness) on map items and ITP steps.</p>
+            </div>
+            <div class="card">
+              <div class="cap-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 17H7A5 5 0 0 1 7 7h2"/><path d="M15 7h2a5 5 0 1 1 0 10h-2"/><line x1="8" y1="12" x2="16" y2="12"/></svg></div>
+              <h3>References &amp; Turnover</h3><p>Track what still needs proof, link source items to their evidence, and pull a live turnover-readiness report.</p>
+            </div>
+            <div class="card">
+              <div class="cap-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg></div>
+              <h3>Reference Lists</h3><p>Read and maintain the controlled vocabularies (welders, weld types, materials, pipe sizes) that other records reference.</p>
+            </div>
+            <div class="card">
+              <div class="cap-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 18V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v11a1 1 0 0 0 1 1h2"/><path d="M15 18H9"/><path d="M19 18h2a1 1 0 0 0 1-1v-3.65a1 1 0 0 0-.22-.62l-3.48-4.35A1 1 0 0 0 17.52 8H14"/><circle cx="17" cy="18" r="2"/><circle cx="7" cy="18" r="2"/></svg></div>
+              <h3>Receiving &amp; Materials</h3><p>Browse incoming shipments and received line items, with quantities and heat numbers for material traceability.</p>
             </div>
             <div class="card">
               <div class="cap-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg></div>
-              <h3>Reference Lookups</h3><p>Search and retrieve technical references and material specifications on demand.</p>
-            </div>
-            <div class="card">
-              <div class="cap-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="m9 15 2 2 4-4"/></svg></div>
-              <h3>Turnover Packages</h3><p>Prepare, read, and summarize turnover information for final engineering handover.</p>
+              <h3>Semantic Search &amp; Guidance</h3><p>Search the entire project in natural language, and get how-to answers from the QC Database user manual.</p>
             </div>
           </div>
         </div>
@@ -328,16 +360,10 @@ _HOME_TEMPLATE = """<!DOCTYPE html>
       <!-- Limitations -->
       <section class="wrap" style="padding-bottom:6rem">
         <div class="cards two">
-          <div class="warn">
+          __UPLOADS_LIMITATION__<div class="warn">
             <div class="warn-row">
               <span class="warn-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></span>
-              <div><h3>Known Limitation: Document Uploads</h3><p>While most features operate seamlessly via remote connection, uploading new documents and drawings requires local desktop file access. This capability is currently unavailable from mobile clients or remote connections. All other read and analyze operations function as expected.</p></div>
-            </div>
-          </div>
-          <div class="warn">
-            <div class="warn-row">
-              <span class="warn-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></span>
-              <div><h3>Known Limitation: Turnover Package Compiler</h3><p>All turnover data is fully accessible remotely, but compiling a complete turnover package — with generated table of contents, all references, and all attachments bundled together — is web only. Custom turnover tooling can still be built as skills on top of this MCP server.</p></div>
+              <div><h3>Known Limitation: Turnover Package Compiler</h3><p>All turnover data is fully accessible remotely, but compiling a complete turnover package (with generated table of contents, all references, and all attachments bundled together) is web only. Custom turnover tooling can still be built as skills on top of this MCP server.</p></div>
             </div>
           </div>
         </div>
@@ -358,14 +384,27 @@ _HOME_TEMPLATE = """<!DOCTYPE html>
       // Year
       document.getElementById("year").textContent = new Date().getFullYear();
 
-      // Copy-to-clipboard for the server URL
+      // Server URL: always derive it from the domain the visitor is actually
+      // on, so the same page advertises the correct endpoint on any host (a
+      // custom domain or a dev origin) without depending on how the server was
+      // configured. The server-rendered value in the markup stays as the no-JS
+      // fallback.
+      (function () {
+        var origin = window.location.origin;
+        var proto = window.location.protocol;
+        if (origin && origin !== "null" && (proto === "http:" || proto === "https:")) {
+          document.getElementById("server-url").textContent = origin + "/mcp";
+        }
+      })();
+
+      // Copy-to-clipboard for the server URL (reads the live value at click time)
       (function () {
         var btn = document.getElementById("copy-btn");
-        var url = document.getElementById("server-url").textContent.trim();
         var icon = document.getElementById("copy-icon");
         var checkPath = '<polyline points="20 6 9 17 4 12"/>';
         var copyPath = '<rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>';
         btn.addEventListener("click", function () {
+          var url = document.getElementById("server-url").textContent.trim();
           navigator.clipboard.writeText(url).then(function () {
             icon.innerHTML = checkPath;
             icon.style.color = "#34d399";
@@ -374,7 +413,7 @@ _HOME_TEMPLATE = """<!DOCTYPE html>
         });
       })();
 
-      // Live status indicator — this server answering /health means it is up.
+      // Live status indicator: this server answering /health means it is up.
       (function () {
         var el = document.getElementById("status");
         var text = document.getElementById("status-text");
@@ -390,10 +429,26 @@ _HOME_TEMPLATE = """<!DOCTYPE html>
 """
 
 
-def home_page_html() -> str:
-    """Render the home page for the current configuration."""
+# The "Document Uploads" limitation card, shown only when hosted file transfer
+# is NOT available. When it is, home_page_html() drops it (replaces with "").
+_UPLOADS_LIMITATION_CARD = """<div class="warn">
+            <div class="warn-row">
+              <span class="warn-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></span>
+              <div><h3>Known Limitation: Document Uploads</h3><p>While most features operate seamlessly via remote connection, uploading new documents and drawings requires local desktop file access. This capability is currently unavailable from mobile clients or remote connections. All other read and analyze operations function as expected.</p></div>
+            </div>
+          </div>
+          """
+
+
+def home_page_html(uploads_enabled: bool = False) -> str:
+    """Render the home page for the current configuration.
+
+    When ``uploads_enabled`` is True the 'Document Uploads' limitation card is
+    omitted, because this hosted server supports remote uploads and downloads.
+    """
     return (
         _HOME_TEMPLATE
+        .replace("__UPLOADS_LIMITATION__", "" if uploads_enabled else _UPLOADS_LIMITATION_CARD)
         .replace("__MCP_ENDPOINT__", html.escape(hosted.resource_url() + "/mcp"))
         .replace("__VERSION__", html.escape(__version__))
         .replace("__ICON_B64__", _ICON_B64)
@@ -411,14 +466,14 @@ def health_payload() -> dict:
     }
 
 
-def register_pages(mcp: FastMCP) -> None:
+def register_pages(mcp: FastMCP, uploads_enabled: bool = False) -> None:
     """Attach the public routes to the hosted FastMCP app."""
     from starlette.requests import Request
     from starlette.responses import HTMLResponse, JSONResponse
 
     @mcp.custom_route("/", methods=["GET"])
     async def home(_request: Request) -> HTMLResponse:
-        return HTMLResponse(home_page_html())
+        return HTMLResponse(home_page_html(uploads_enabled))
 
     @mcp.custom_route("/health", methods=["GET"])
     async def health(_request: Request) -> JSONResponse:

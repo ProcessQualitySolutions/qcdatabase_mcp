@@ -178,6 +178,75 @@ def test_get_all_flags_truncation(monkeypatch):
     assert c.last_truncated is True
 
 
+def test_get_all_unwraps_lists_envelope():
+    # /api/lists/projects/{pid}/ returns {"lists": [...]}; each list keeps its id.
+    def handler(request):
+        return httpx.Response(200, json={"lists": [
+            {"id": "a1", "name": "Welders"},
+            {"id": "b2", "name": "Materials"},
+        ]})
+    c = _client_with(handler)
+    out = c.get_all("/api/lists/projects/p1/")
+    assert [x["id"] for x in out] == ["a1", "b2"]
+
+
+def test_get_all_unwraps_unknown_single_key_envelope():
+    # Any {"<key>": [...]} single-key wrapper is unwrapped, not returned as one row.
+    def handler(request):
+        return httpx.Response(200, json={"widgets": [{"id": 1}, {"id": 2}]})
+    c = _client_with(handler)
+    assert c.get_all("/api/x/") == [{"id": 1}, {"id": 2}]
+
+
+def test_get_all_wraps_bare_multikey_object():
+    # A genuine single object (multi-key, no list value) is still wrapped as one row.
+    def handler(request):
+        return httpx.Response(200, json={"id": "x", "name": "solo"})
+    c = _client_with(handler)
+    assert c.get_all("/api/x/") == [{"id": "x", "name": "solo"}]
+
+
+def test_get_all_wraps_single_key_nonlist_dict():
+    # Boundary: a single-key dict whose value is NOT a list (e.g. an error
+    # envelope) must stay wrapped, not get unwrapped by the generic fallback.
+    def handler(request):
+        return httpx.Response(200, json={"detail": "Not found."})
+    c = _client_with(handler)
+    assert c.get_all("/api/x/") == [{"detail": "Not found."}]
+
+
+# ---------------------------------------------------------------------------
+# _handle exposes the HTTP status (downloads key their /export/ fallback off it)
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("code", [400, 404, 413, 500])
+def test_handle_sets_status_code_on_apierror(code):
+    def handler(request):
+        return httpx.Response(code, json={"detail": "nope"})
+
+    c = _client_with(handler)
+    with pytest.raises(APIError) as ei:
+        c.get("/api/x/")
+    assert ei.value.status_code == code  # the download fallback keys off this
+
+
+def test_handle_401_clears_token_and_sets_status_code():
+    # access_token set => hosted path: a 401 falls straight through to _handle
+    # (no refresh/retry), which clears the token and raises AuthError. Assert the
+    # status is attached there too, since any status-aware caller relies on it.
+    from qcdatabase_mcp import auth
+
+    def handler(request):
+        return httpx.Response(401, json={"detail": "expired"})
+
+    http = httpx.Client(transport=httpx.MockTransport(handler), base_url="https://qcdatabase.ai")
+    store = _FakeStore()
+    c = QCClient(store=store, access_token="tok", http=http)
+    with pytest.raises(auth.AuthError) as ei:
+        c.get("/api/x/")
+    assert store.cleared is True
+    assert ei.value.status_code == 401
+
+
 # ---------------------------------------------------------------------------
 # H2 / M1 — subject extraction, fail-closed, session keying
 # ---------------------------------------------------------------------------
