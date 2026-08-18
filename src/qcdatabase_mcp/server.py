@@ -984,6 +984,38 @@ def list_form_schemas() -> str:
     return _render_list("Form schemas:", data, empty="No form schemas are defined for this project.")
 
 
+@mcp.tool()
+@_safe
+def get_drawing_schema() -> str:
+    """Get the extraction schema for drawings in this project: which fields QC
+    Database pulls out of an uploaded drawing (title, number, revision, ...),
+    each field's type, and the validation rules behind them. The response
+    carries the raw schema (in 'type - description' form) plus a Draft-07 JSON
+    Schema mirroring the validation.
+
+    Read this before 'upload_drawing', 'upload_drawing_to_package' or
+    'upload_drawing_version' to know what extraction will produce, or when
+    interpreting the extracted fields on a drawing from 'get_drawing'."""
+    pid = require_project()
+    return _pretty(client().get(f"/api/projects/{pid}/schemas/drawing/"))
+
+
+@mcp.tool()
+@_safe
+def get_large_format_drawing_schema() -> str:
+    """Get the extraction schema for large format drawings (LFDs) in this
+    project: which fields QC Database pulls out of an uploaded LFD, each
+    field's type, and the validation rules behind them. The response carries
+    the raw schema (in 'type - description' form) plus a Draft-07 JSON Schema
+    mirroring the validation.
+
+    Read this before 'upload_large_format_drawing' or
+    'upload_large_format_drawing_version' to know what extraction will
+    produce, or when interpreting an LFD's extracted fields."""
+    pid = require_project()
+    return _pretty(client().get(f"/api/projects/{pid}/schemas/large-format-drawing/"))
+
+
 # ===========================================================================
 # Jobs (work orders)
 # ===========================================================================
