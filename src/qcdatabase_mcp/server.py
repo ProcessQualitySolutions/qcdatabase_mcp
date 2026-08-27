@@ -470,11 +470,33 @@ def _open_file(path: str) -> tuple[str, Any, str]:
 
 
 def _read_bytes(path: str | Path) -> bytes:
-    """Read a whole local file the caller pointed at, through the same guard."""
+    """Read a local file or consume a hosted upload handle into memory."""
+    if hosted.hosted_enabled():
+        if _uploads is None:
+            raise ValueError(_HOSTED_TRANSFER_OFF)
+        _name, stream, _ctype = _uploads.resolve_upload(str(path))
+        return stream.read()
     safe = _guard_local_path(Path(path), write=False)
     if not safe.is_file():
         raise FileNotFoundError(f"No file at: {path}")
     return safe.read_bytes()
+
+
+def _read_hosted_upload(handle: str) -> tuple[str, bytes]:
+    """Consume one hosted upload while preserving its original filename."""
+    if _uploads is None:
+        raise ValueError(_HOSTED_TRANSFER_OFF)
+    name, stream, _ctype = _uploads.resolve_upload(handle)
+    return name, stream.read()
+
+
+def _is_zipmap_json(name: str, content: bytes) -> bool:
+    """Identify flattened JSON while giving recognizable ZIP bytes priority."""
+    # ZIPs can start with a local header, an empty-archive end record, or a
+    # spanning marker. Content wins over a misleading original extension.
+    if content.startswith((b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")):
+        return False
+    return content.lstrip().startswith(b"{") or name.lower().endswith(".json")
 
 
 def _save_bytes(save_path: str, content: bytes) -> Any:
@@ -617,6 +639,10 @@ def _zipmap_members(file_path: str) -> tuple[dict[str, bytes], bool]:
     read member by member, each file re-checked by the same local-path guard so
     a symlink inside it cannot reach the server's own files.
     """
+    if hosted.hosted_enabled():
+        _name, content = _read_hosted_upload(file_path)
+        return zm.read_archive(content), True
+
     safe = _guard_local_path(Path(file_path), write=False)
     if not safe.is_dir():
         return zm.read_archive(_read_bytes(safe)), True
@@ -1863,10 +1889,22 @@ def inspect_zipmap(file_path: str) -> str:
     schema_ids. Comparing the type's fields here against the schema's fields is how
     you confirm the match before anything is written.
 
-    Local files only - this works with the local (stdio) server, not a hosted one."""
-    if file_path.lower().endswith(".json"):
-        doc, info = zm.load_document(_read_bytes(file_path))
-        lines = [f"{file_path}: a flattened .zipmap.json document (ready to upload)."]
+    On a hosted server, call 'begin_upload' first, send the bytes with
+    'put_upload', and pass the returned handle as file_path. On a local (stdio)
+    server, pass a path to a .zipmap archive, .zipmap.json document, or folder.
+    A hosted handle is single-use: after inspecting, call 'begin_upload' again
+    and send the same file to get a fresh handle for 'upload_zipmap'."""
+    if hosted.hosted_enabled():
+        display_name, content = _read_hosted_upload(file_path)
+        is_json = _is_zipmap_json(display_name, content)
+    else:
+        display_name = file_path
+        is_json = file_path.lower().endswith(".json")
+        content = _read_bytes(file_path) if is_json else b""
+
+    if is_json:
+        doc, info = zm.load_document(content)
+        lines = [f"{display_name}: a flattened .zipmap.json document (ready to upload)."]
         img = info["image"]
         lines.append(f"Drawing image: {img['width']}x{img['height']} px")
         lines.append(f"Carries a PDF: {'yes' if doc.get('pdf_b64') else 'no'}")
@@ -1881,11 +1919,14 @@ def inspect_zipmap(file_path: str) -> str:
         )
         return "\n".join(lines)
 
-    members, _ = _zipmap_members(file_path)
+    if hosted.hosted_enabled():
+        members = zm.read_archive(content)
+    else:
+        members, _ = _zipmap_members(file_path)
     found = zm.inspect(members)
     img = found["image"]
     title = " - ".join(str(x) for x in (found["drawing_number"], found["title"]) if x)
-    lines = [f"Zipmap: {file_path}"]
+    lines = [f"Zipmap: {display_name}"]
     if title:
         rev = found["revision"]
         lines.append(f"Drawing: {title}" + (f" (rev {rev})" if rev else ""))
@@ -1929,7 +1970,9 @@ def upload_zipmap(
     creates nothing at all. No server-side AI runs on it.
 
     'file_path' is a .zipmap archive, the folder one was unpacked from, or an
-    already-flattened .zipmap.json document. Local files only (stdio server).
+    already-flattened .zipmap.json document. On a hosted server, call
+    'begin_upload' first, send the bytes with 'put_upload', and pass the returned
+    handle here. Unpacked folders are supported only by the local (stdio) server.
 
     BEFORE YOU CALL THIS, do three things:
       1. 'inspect_zipmap' - see the drawing, the item types and their fields, and
@@ -1982,8 +2025,16 @@ def upload_zipmap(
     if extra is not None and not isinstance(extra, dict):
         raise ValueError("'extracted_data' must be a JSON object.")
 
-    if file_path.lower().endswith(".json"):
-        doc, _info = zm.load_document(_read_bytes(file_path))
+    if hosted.hosted_enabled():
+        upload_name, upload_content = _read_hosted_upload(file_path)
+        is_json = _is_zipmap_json(upload_name, upload_content)
+    else:
+        upload_name = file_path
+        is_json = file_path.lower().endswith(".json")
+        upload_content = _read_bytes(file_path) if is_json else b""
+
+    if is_json:
+        doc, _info = zm.load_document(upload_content)
         if overrides:
             raise ValueError(
                 "'schema_ids' applies to a .zipmap archive's type names. A "
@@ -1993,7 +2044,10 @@ def upload_zipmap(
         if extra is not None:
             doc["extracted_data"] = extra
     else:
-        members, from_archive = _zipmap_members(file_path)
+        if hosted.hosted_enabled():
+            members, from_archive = zm.read_archive(upload_content), True
+        else:
+            members, from_archive = _zipmap_members(file_path)
         doc, _info = zm.build_document(
             members, schema_ids=overrides, from_archive=from_archive, extracted_data=extra
         )

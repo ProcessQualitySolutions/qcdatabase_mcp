@@ -369,10 +369,132 @@ def test_zipmap_members_refuses_a_folder_that_is_not_a_zipmap(monkeypatch, tmp_p
         server._zipmap_members(str(tmp_path / "empty"))
 
 
-def test_zipmap_members_refuses_local_files_in_hosted_mode(monkeypatch, tmp_path):
+def test_zipmap_members_consumes_upload_handle_in_hosted_mode(monkeypatch):
     server = _server(monkeypatch)
-    archive = tmp_path / "demo.zipmap"
-    archive.write_bytes(_archive(_members()))
     monkeypatch.setenv("QCDB_MCP_HTTP", "1")
-    with pytest.raises(ValueError, match="cannot access local files"):
-        server._zipmap_members(str(archive))
+    archive = _archive(_members())
+
+    class Uploads:
+        @staticmethod
+        def resolve_upload(handle):
+            assert handle == "upload-handle"
+            return "demo.zipmap", io.BytesIO(archive), "application/octet-stream"
+
+    monkeypatch.setattr(server, "_uploads", Uploads())
+    members, from_archive = server._zipmap_members("upload-handle")
+    assert from_archive is True
+    assert set(members) == set(_members())
+
+
+def test_read_bytes_consumes_upload_handle_in_hosted_mode(monkeypatch):
+    server = _server(monkeypatch)
+    monkeypatch.setenv("QCDB_MCP_HTTP", "1")
+
+    class Uploads:
+        @staticmethod
+        def resolve_upload(handle):
+            assert handle == "upload-handle"
+            return "map.zipmap", io.BytesIO(b"zipmap bytes"), "application/octet-stream"
+
+    monkeypatch.setattr(server, "_uploads", Uploads())
+    assert server._read_bytes("upload-handle") == b"zipmap bytes"
+
+
+@pytest.mark.parametrize(
+    ("filename", "handle"),
+    [
+        ("flattened.zipmap.json", "opaque-handle"),
+        ("upload-without-an-extension", "another-handle"),
+    ],
+)
+def test_upload_zipmap_recognizes_hosted_json_by_name_or_content(
+    monkeypatch, filename, handle
+):
+    server = _server(monkeypatch)
+    monkeypatch.setenv("QCDB_MCP_HTTP", "1")
+    document, _ = zm.build_document(
+        zm.read_archive(_archive(_members())), schema_ids={"weld": "wsc_1"}
+    )
+    raw = json.dumps(document).encode()
+    consumed = []
+
+    class Uploads:
+        @staticmethod
+        def resolve_upload(got):
+            consumed.append(got)
+            return filename, io.BytesIO(raw), "application/json"
+
+    class Store:
+        @staticmethod
+        def get_active_project():
+            return {"id": "proj-1"}
+
+    class Client:
+        store = Store()
+        posted = None
+
+        def post(self, path, json=None, **kwargs):
+            assert path == "/api/mapping/projects/proj-1/zipmaps/"
+            self.posted = json
+            return {
+                "drawing_id": "drawing-1",
+                "package_id": "package-1",
+                "mode": "append",
+                "map_items_created": 2,
+            }
+
+    api = Client()
+    monkeypatch.setattr(server, "_uploads", Uploads())
+    monkeypatch.setattr(server, "client", lambda: api)
+
+    result = server.upload_zipmap(handle, "package-1")
+
+    assert "Uploaded zipmap" in result
+    assert consumed == [handle]  # upload handles are single-use
+    assert api.posted["document"]["zipmap_json"] == "1.1"
+
+
+def test_inspect_zipmap_recognizes_hosted_archive_by_magic(monkeypatch):
+    server = _server(monkeypatch)
+    monkeypatch.setenv("QCDB_MCP_HTTP", "1")
+    raw = _archive(_members())
+
+    class Uploads:
+        @staticmethod
+        def resolve_upload(handle):
+            return "upload-without-an-extension", io.BytesIO(raw), "application/octet-stream"
+
+    monkeypatch.setattr(server, "_uploads", Uploads())
+    result = server.inspect_zipmap("opaque-handle")
+    assert "Zipmap: upload-without-an-extension" in result
+    assert "type 'weld'" in result
+
+
+def test_inspect_zipmap_archive_bytes_override_misleading_json_name(monkeypatch):
+    server = _server(monkeypatch)
+    monkeypatch.setenv("QCDB_MCP_HTTP", "1")
+    raw = _archive(_members())
+
+    class Uploads:
+        @staticmethod
+        def resolve_upload(handle):
+            return "actually-an-archive.json", io.BytesIO(raw), "application/json"
+
+    monkeypatch.setattr(server, "_uploads", Uploads())
+    result = server.inspect_zipmap("opaque-handle")
+    assert "Zipmap: actually-an-archive.json" in result
+    assert "type 'weld'" in result
+
+
+def test_inspect_local_json_expands_home_directory(monkeypatch, tmp_path):
+    server = _server(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    document, _ = zm.build_document(
+        zm.read_archive(_archive(_members())), schema_ids={"weld": "wsc_1"}
+    )
+    (tmp_path / "demo.zipmap.json").write_text(json.dumps(document))
+
+    result = server.inspect_zipmap("~/demo.zipmap.json")
+
+    assert "flattened .zipmap.json document" in result
+    assert "schema wsc_1" in result
