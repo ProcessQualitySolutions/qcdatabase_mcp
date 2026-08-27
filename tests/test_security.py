@@ -340,6 +340,87 @@ def test_verifier_cache_values_contain_no_raw_token():
             assert "SUPER-SECRET-TOKEN" not in (identity.scopes or [])
 
 
+def test_verifier_two_users_isolated_regardless_of_cache_state():
+    """Two distinct tokens must each resolve to their own user only.
+
+    Verifies both the live-lookup path (first call per token) and the cache-hit
+    path (second call per token) return the correct subject for each caller.
+    """
+
+    class _TwoUserHTTP:
+        def __init__(self):
+            self.calls = 0
+
+        async def get(self, path, headers=None):
+            self.calls += 1
+            token = (headers or {}).get("Authorization", "").split()[-1]
+            if token == "token-alice":
+                return _FakeResp(200, {"id": "Ualice", "tenant": {"id": "T1"}, "scopes": ["read"]})
+            if token == "token-bob":
+                return _FakeResp(200, {"id": "Ubob", "tenant": {"id": "T1"}, "scopes": ["read"]})
+            return _FakeResp(401, None)
+
+    v = hosted.QCDBTokenVerifier(cache_ttl=60, neg_cache_ttl=5)
+    v._http = _TwoUserHTTP()
+
+    # First call for each token hits the API.
+    at_alice = asyncio.run(v.verify_token("token-alice"))
+    at_bob = asyncio.run(v.verify_token("token-bob"))
+    assert at_alice is not None and at_alice.subject == "T1:Ualice"
+    assert at_bob is not None and at_bob.subject == "T1:Ubob"
+    assert at_alice.subject != at_bob.subject
+    assert v._http.calls == 2
+
+    # Second call for each token is served from cache — subjects still correct.
+    at_alice2 = asyncio.run(v.verify_token("token-alice"))
+    at_bob2 = asyncio.run(v.verify_token("token-bob"))
+    assert at_alice2 is not None and at_alice2.subject == "T1:Ualice"
+    assert at_bob2 is not None and at_bob2.subject == "T1:Ubob"
+    assert v._http.calls == 2  # no additional API calls
+
+
+def test_verifier_cache_hit_reconstruction_uses_callers_token():
+    """On a cache hit the reconstructed AccessToken must carry the *caller's* raw
+    token, not a credential from any other source.
+
+    The cache stores only derived identity (_CachedIdentity, no token field).
+    When the cache is pre-populated for a given key and verify_token is called
+    with a token mapping to that key, the returned AccessToken.token must equal
+    exactly the token the caller passed — proving reconstruction never substitutes
+    a stored or external credential.
+    """
+    import time as _time
+
+    v = hosted.QCDBTokenVerifier(cache_ttl=60, neg_cache_ttl=5)
+    # Replace the live HTTP client with a fake that asserts it is never reached.
+    v._http = _FakeHTTP(200, {"id": "SHOULD-NOT-BE-CALLED"})
+
+    caller_token = "caller-token-xyz-unique"
+    cache_key = v._cache_key(caller_token)
+
+    # Inject a derived-identity-only cache entry (no raw token stored, per design).
+    injected_identity = hosted._CachedIdentity(
+        client_id="qcdatabase-mcp",
+        scopes=["read"],
+        subject="T1:Uowner",
+        claims={"id": "Uowner", "tenant": {"id": "T1"}},
+    )
+    v._cache[cache_key] = (_time.monotonic() + 60, injected_identity)
+
+    at = asyncio.run(v.verify_token(caller_token))
+
+    assert at is not None, "cache hit should return a valid AccessToken"
+    # Identity comes from the injected cache entry.
+    assert at.subject == "T1:Uowner"
+    # Token in the reconstructed AccessToken must be the caller's own token.
+    assert at.token == caller_token, (
+        f"reconstructed AccessToken.token ({at.token!r}) must equal the caller's "
+        f"token ({caller_token!r}), not a stored credential"
+    )
+    # The HTTP client must not have been called at all (pure cache hit).
+    assert v._http.calls == 0, "cache hit must not issue a whoami call"
+
+
 # ---------------------------------------------------------------------------
 # old-M1 — refresh only clears the token on invalid-grant
 # ---------------------------------------------------------------------------
