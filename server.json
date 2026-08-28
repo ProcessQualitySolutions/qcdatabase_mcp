@@ -1,0 +1,17 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "ai.qcdatabase/mcp",
+  "title": "QCDatabase.AI",
+  "description": "Connects AI assistants to QCDatabase.AI for everyday construction quality-control work.",
+  "repository": {
+    "url": "https://github.com/ProcessQualitySolutions/qcdatabase_mcp",
+    "source": "github"
+  },
+  "version": "0.1.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://mcp.qcdatabase.ai/mcp"
+    }
+  ]
+}
