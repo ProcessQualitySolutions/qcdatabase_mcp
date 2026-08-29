@@ -488,7 +488,8 @@ def test_inspect_zipmap_archive_bytes_override_misleading_json_name(monkeypatch)
 
 def test_inspect_local_json_expands_home_directory(monkeypatch, tmp_path):
     server = _server(monkeypatch)
-    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))  # POSIX
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows ignores HOME
     document, _ = zm.build_document(
         zm.read_archive(_archive(_members())), schema_ids={"weld": "wsc_1"}
     )
