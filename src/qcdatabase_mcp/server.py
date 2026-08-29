@@ -29,7 +29,7 @@ from urllib.parse import quote
 
 import httpx
 from mcp.server.fastmcp import FastMCP
-from mcp.types import BlobResourceContents, EmbeddedResource, TextContent
+from mcp.types import BlobResourceContents, EmbeddedResource, TextContent, ToolAnnotations
 
 from . import BASE_URL
 from . import zipmap as zm
@@ -83,6 +83,28 @@ if hosted.hosted_enabled():
     register_pages(mcp, uploads_enabled=_uploads is not None)
 else:
     mcp = FastMCP("qcdatabase")
+
+def _tool(title: str, *, read_only: bool = False, destructive: bool = False,
+          idempotent: bool = False, **kwargs: Any):
+    """mcp.tool() plus the metadata every tool must carry for MCP directories:
+    a human-readable title and readOnly/destructive/idempotent annotations.
+
+    ``read_only`` means the tool touches nothing - tools that can save a file
+    locally (``save_path``) are not read-only even though they only fetch data.
+    ``destructive`` marks tools that delete or overwrite existing records;
+    additive creates/uploads and reversible status changes are not destructive.
+    """
+    return mcp.tool(
+        title=title,
+        annotations=ToolAnnotations(
+            title=title,
+            readOnlyHint=read_only,
+            destructiveHint=destructive,
+            idempotentHint=idempotent,
+        ),
+        **kwargs,
+    )
+
 
 # stdio mode reuses one client (and its on-disk store) for the whole process.
 _client: QCClient | None = None
@@ -695,7 +717,7 @@ def _safe(fn):
 # ===========================================================================
 # Session & authentication
 # ===========================================================================
-@mcp.tool()
+@_tool('Log In')
 @_safe
 def login() -> str:
     """Sign in to QC Database. Opens your web browser so you can log in and pick
@@ -720,7 +742,7 @@ def login() -> str:
     )
 
 
-@mcp.tool()
+@_tool('Log Out', idempotent=True)
 @_safe
 def logout() -> str:
     """Sign out and forget the saved login on this computer."""
@@ -734,7 +756,7 @@ def logout() -> str:
     return "Signed out. Run 'login' to connect again."
 
 
-@mcp.tool()
+@_tool('Authentication Status', read_only=True)
 @_safe
 def auth_status() -> str:
     """Check whether you are signed in and which project is currently active."""
@@ -755,7 +777,7 @@ def auth_status() -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
+@_tool('Who Am I', read_only=True)
 @_safe
 def whoami() -> str:
     """Show who the server is signed in as: your user, the organization (tenant)
@@ -767,7 +789,7 @@ def whoami() -> str:
 # ===========================================================================
 # Orientation & discovery
 # ===========================================================================
-@mcp.tool()
+@_tool('List Tenants', read_only=True)
 @_safe
 def list_tenants() -> str:
     """List the organizations (tenants) your account belongs to. Your login is
@@ -776,7 +798,7 @@ def list_tenants() -> str:
     return _render_list("Organizations you can access:", data)
 
 
-@mcp.tool()
+@_tool('List Projects', read_only=True)
 @_safe
 def list_projects(search: str = "") -> str:
     """List the projects in your connected organization. Optionally filter by a
@@ -785,7 +807,7 @@ def list_projects(search: str = "") -> str:
     return _render_list("Projects:", data, empty="No projects found.")
 
 
-@mcp.tool()
+@_tool('Set Project', idempotent=True)
 @_safe
 def set_project(project_id: str = "", name_or_code: str = "") -> str:
     """Choose the project to work in for the rest of this session. Almost every
@@ -827,7 +849,7 @@ def set_project(project_id: str = "", name_or_code: str = "") -> str:
     return msg
 
 
-@mcp.tool()
+@_tool('Get Active Project', read_only=True)
 @_safe
 def get_active_project() -> str:
     """Show which project is currently active for this session."""
@@ -837,7 +859,7 @@ def get_active_project() -> str:
     return f"Active project: {proj.get('name', proj['id'])} ({proj['id']})"
 
 
-@mcp.tool()
+@_tool('List Project Members', read_only=True)
 @_safe
 def list_project_members() -> str:
     """List the active members of the current project (use their ids when
@@ -847,7 +869,7 @@ def list_project_members() -> str:
     return _render_list("Project members:", data)
 
 
-@mcp.tool()
+@_tool('List Lists', read_only=True)
 @_safe
 def list_lists() -> str:
     """List the project's controlled-vocabulary lists (welders, weld types,
@@ -857,7 +879,7 @@ def list_lists() -> str:
     return _render_list("Project lists:", data)
 
 
-@mcp.tool()
+@_tool('List List Items', read_only=True)
 @_safe
 def list_list_items(list_id: str) -> str:
     """Read the entries in one controlled-vocabulary list, INCLUDING each entry's
@@ -873,7 +895,7 @@ def list_list_items(list_id: str) -> str:
     return _render_list_items(payload)
 
 
-@mcp.tool()
+@_tool('Create List Item')
 @_safe
 def create_list_item(list_id: str, name: str, status: str = "", data: str = "") -> str:
     """Add an entry to a controlled-vocabulary list (e.g. a new welder or material).
@@ -890,7 +912,7 @@ def create_list_item(list_id: str, name: str, status: str = "", data: str = "") 
     return f"Created list item '{name}'.\n\n{_pretty(result)}"
 
 
-@mcp.tool()
+@_tool('Update List Item', destructive=True)
 @_safe
 def update_list_item(item_id: str, name: str = "", status: str = "", data: str = "") -> str:
     """Update a controlled-vocabulary list entry. Supply any of name, status, and
@@ -910,7 +932,7 @@ def update_list_item(item_id: str, name: str = "", status: str = "", data: str =
     return f"List item {item_id} updated.\n\n{_pretty(result)}"
 
 
-@mcp.tool()
+@_tool('Delete List Item', destructive=True)
 @_safe
 def delete_list_item(item_id: str) -> str:
     """Remove a controlled-vocabulary list entry from the project's lists.
@@ -927,7 +949,7 @@ def delete_list_item(item_id: str) -> str:
     )
 
 
-@mcp.tool()
+@_tool('List Map Item Schemas', read_only=True)
 @_safe
 def list_map_item_schemas() -> str:
     """List the map item schemas in this project, with the custom fields each one
@@ -971,7 +993,7 @@ def list_map_item_schemas() -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
+@_tool('Get Map Item Schema', read_only=True)
 @_safe
 def get_map_item_schema(schema_id: str) -> str:
     """Get ONE map item schema's full definition - every custom field it declares,
@@ -987,7 +1009,7 @@ def get_map_item_schema(schema_id: str) -> str:
     return _pretty(client().get(f"/api/projects/{pid}/schemas/map-items/{schema_id}/"))
 
 
-@mcp.tool()
+@_tool('List Document Folders', read_only=True)
 @_safe
 def list_document_folders() -> str:
     """List the document folders (document types) and their extraction schemas -
@@ -998,7 +1020,7 @@ def list_document_folders() -> str:
     return _render_list("Document folders / types:", data)
 
 
-@mcp.tool()
+@_tool('List Form Schemas', read_only=True)
 @_safe
 def list_form_schemas() -> str:
     """List the custom inspection-form schemas defined for this project, INCLUDING
@@ -1010,7 +1032,7 @@ def list_form_schemas() -> str:
     return _render_list("Form schemas:", data, empty="No form schemas are defined for this project.")
 
 
-@mcp.tool()
+@_tool('Get Drawing Schema', read_only=True)
 @_safe
 def get_drawing_schema() -> str:
     """Get the extraction schema for drawings in this project: which fields QC
@@ -1026,7 +1048,7 @@ def get_drawing_schema() -> str:
     return _pretty(client().get(f"/api/projects/{pid}/schemas/drawing/"))
 
 
-@mcp.tool()
+@_tool('Get Large Format Drawing Schema', read_only=True)
 @_safe
 def get_large_format_drawing_schema() -> str:
     """Get the extraction schema for large format drawings (LFDs) in this
@@ -1045,7 +1067,7 @@ def get_large_format_drawing_schema() -> str:
 # ===========================================================================
 # Jobs (work orders)
 # ===========================================================================
-@mcp.tool()
+@_tool('List Jobs', read_only=True)
 @_safe
 def list_jobs(status: str = "", search: str = "") -> str:
     """List the jobs (work orders) in the current project. Optionally filter by
@@ -1058,7 +1080,7 @@ def list_jobs(status: str = "", search: str = "") -> str:
     return _render_list("Jobs:", data)
 
 
-@mcp.tool()
+@_tool('Create Job')
 @_safe
 def create_job(
     name: str,
@@ -1085,7 +1107,7 @@ def create_job(
 # ===========================================================================
 # Packages (test packages)
 # ===========================================================================
-@mcp.tool()
+@_tool('List Packages', read_only=True)
 @_safe
 def list_packages(job: str = "", status: str = "", package_type: str = "", search: str = "") -> str:
     """List the test packages in the current project. Optionally filter by job id,
@@ -1103,7 +1125,7 @@ def list_packages(job: str = "", status: str = "", package_type: str = "", searc
     return _render_list("Packages:", data)
 
 
-@mcp.tool()
+@_tool('Create Package')
 @_safe
 def create_package(
     job: str,
@@ -1141,7 +1163,7 @@ def create_package(
 # ===========================================================================
 # Line specifications
 # ===========================================================================
-@mcp.tool()
+@_tool('List Line Specs', read_only=True)
 @_safe
 def list_line_specs(status: str = "", search: str = "") -> str:
     """List the line specifications (per-line requirement sets) in the current
@@ -1153,7 +1175,7 @@ def list_line_specs(status: str = "", search: str = "") -> str:
     return _render_list("Line specifications:", data)
 
 
-@mcp.tool()
+@_tool('Create Line Spec')
 @_safe
 def create_line_spec(name: str, requirements: str = "", status: str = "") -> str:
     """Create a line specification in the current project. 'name' is required;
@@ -1171,7 +1193,7 @@ def create_line_spec(name: str, requirements: str = "", status: str = "") -> str
 # ===========================================================================
 # Documents
 # ===========================================================================
-@mcp.tool()
+@_tool('List Documents', read_only=True)
 @_safe
 def list_documents(folder_id: str = "", status: str = "", search: str = "") -> str:
     """List uploaded documents in the current project. Optionally filter by a
@@ -1188,7 +1210,7 @@ def list_documents(folder_id: str = "", status: str = "", search: str = "") -> s
     return _render_list("Documents:", data)
 
 
-@mcp.tool()
+@_tool('Upload Document')
 @_safe
 def upload_document(file_path: str, folder_id: str = "", do_not_extract: bool = False) -> str:
     """Upload a record (MTR, NDE report, certificate, procedure, etc.) to the
@@ -1220,14 +1242,14 @@ def upload_document(file_path: str, folder_id: str = "", do_not_extract: bool = 
     return f"Uploaded '{name}'.\n\n{_pretty(result)}"
 
 
-@mcp.tool()
+@_tool('Get Document', read_only=True)
 @_safe
 def get_document(document_id: str) -> str:
     """Get one document's details, including its AI-extracted structured data."""
     return _pretty(client().get(f"/api/documents/{document_id}/"))
 
 
-@mcp.tool()
+@_tool('Set Document Extracted Data', destructive=True, idempotent=True)
 @_safe
 def set_document_extracted_data(document_id: str, extracted_data: str) -> str:
     """Write structured fields back onto a document (used after you run your own
@@ -1239,7 +1261,7 @@ def set_document_extracted_data(document_id: str, extracted_data: str) -> str:
     return f"Extracted data saved on document {document_id}.\n\n{_pretty(result)}"
 
 
-@mcp.tool()
+@_tool('Upload Document Version')
 @_safe
 def upload_document_version(document_id: str, file_path: str, do_not_extract: bool = False) -> str:
     """Upload a new revision of an existing document. The current file and its
@@ -1260,7 +1282,7 @@ def upload_document_version(document_id: str, file_path: str, do_not_extract: bo
     return f"Uploaded new version '{name}' of document {document_id}.\n\n{_pretty(result)}"
 
 
-@mcp.tool(structured_output=False)
+@_tool('Download Document', structured_output=False)
 @_safe
 def download_document(document_id: str, save_path: str = "") -> Any:
     """Download a document's original uploaded file.
@@ -1281,7 +1303,7 @@ def download_document(document_id: str, save_path: str = "") -> Any:
 # ===========================================================================
 # Drawings
 # ===========================================================================
-@mcp.tool()
+@_tool('List Drawings', read_only=True)
 @_safe
 def list_drawings(drawing_type: str = "", status: str = "", search: str = "") -> str:
     """List the drawings in the current project (use a drawing's id when creating
@@ -1299,7 +1321,7 @@ def list_drawings(drawing_type: str = "", status: str = "", search: str = "") ->
     return _render_list("Drawings:", data)
 
 
-@mcp.tool()
+@_tool('Get Drawing', read_only=True)
 @_safe
 def get_drawing(drawing_id: str) -> str:
     """Get one drawing's full record, including its AI-extracted data, sheet info,
@@ -1319,7 +1341,7 @@ def get_drawing(drawing_id: str) -> str:
     return _pretty(client().get(f"/api/drawings/{drawing_id}/"))
 
 
-@mcp.tool()
+@_tool('Upload Drawing')
 @_safe
 def upload_drawing(file_path: str, do_not_extract: bool = False) -> str:
     """Upload an isometric drawing (PDF) to the current project. Multi-page PDFs
@@ -1353,7 +1375,7 @@ def upload_drawing(file_path: str, do_not_extract: bool = False) -> str:
     return f"Uploaded drawing '{name}'.\n\n{_pretty(result)}"
 
 
-@mcp.tool()
+@_tool('Upload Large Format Drawing')
 @_safe
 def upload_large_format_drawing(file_path: str, do_not_extract: bool = False) -> str:
     """Upload a large-format drawing (P&ID, plan, elevation, overview) PDF to the
@@ -1379,7 +1401,7 @@ def upload_large_format_drawing(file_path: str, do_not_extract: bool = False) ->
     return f"Uploaded large-format drawing '{name}'.\n\n{_pretty(result)}"
 
 
-@mcp.tool()
+@_tool('Upload Drawing To Package')
 @_safe
 def upload_drawing_to_package(package_id: str, file_path: str, do_not_extract: bool = False) -> str:
     """Upload an isometric drawing (PDF) straight into a specific package in the
@@ -1407,7 +1429,7 @@ def upload_drawing_to_package(package_id: str, file_path: str, do_not_extract: b
     return f"Uploaded drawing '{name}' into package {package_id}.\n\n{_pretty(result)}"
 
 
-@mcp.tool()
+@_tool('Upload Drawing Version')
 @_safe
 def upload_drawing_version(drawing_id: str, file_path: str, do_not_extract: bool = False) -> str:
     """Upload a new revision of an existing drawing (a single-page PDF or image).
@@ -1427,7 +1449,7 @@ def upload_drawing_version(drawing_id: str, file_path: str, do_not_extract: bool
     return f"Uploaded new version '{name}' of drawing {drawing_id}.\n\n{_pretty(result)}"
 
 
-@mcp.tool()
+@_tool('Upload Large Format Drawing Version')
 @_safe
 def upload_large_format_drawing_version(lfd_id: str, file_path: str, do_not_extract: bool = False) -> str:
     """Upload a new revision of an existing large-format drawing. The current file
@@ -1447,7 +1469,7 @@ def upload_large_format_drawing_version(lfd_id: str, file_path: str, do_not_extr
     return f"Uploaded new version '{name}' of large-format drawing {lfd_id}.\n\n{_pretty(result)}"
 
 
-@mcp.tool(structured_output=False)
+@_tool('Export Drawing', structured_output=False)
 @_safe
 def export_drawing(drawing_id: str, save_path: str = "", variant: str = "clean", schema_id: str = "") -> Any:
     """Render a drawing to a PDF. variant='clean' (default) is the bare drawing;
@@ -1468,7 +1490,7 @@ def export_drawing(drawing_id: str, save_path: str = "", variant: str = "clean",
     )
 
 
-@mcp.tool(structured_output=False)
+@_tool('Export Large Format Drawing', structured_output=False)
 @_safe
 def export_large_format_drawing(lfd_id: str, save_path: str = "", variant: str = "clean") -> Any:
     """Render a large-format drawing to a PDF. variant='clean' (default) is the bare
@@ -1487,7 +1509,7 @@ def export_large_format_drawing(lfd_id: str, save_path: str = "", variant: str =
     )
 
 
-@mcp.tool(structured_output=False)
+@_tool('Get Drawing Image', structured_output=False)
 @_safe
 def get_drawing_image(drawing_id: str, save_path: str = "") -> Any:
     """Get a drawing's rendered canvas image (PNG) - the raster you overlay map
@@ -1504,7 +1526,7 @@ def get_drawing_image(drawing_id: str, save_path: str = "") -> Any:
     return _deliver_image(env, save_path or env["filename"] or f"drawing-{drawing_id}.png")
 
 
-@mcp.tool(structured_output=False)
+@_tool('Get Large Format Drawing Image', structured_output=False)
 @_safe
 def get_large_format_drawing_image(lfd_id: str, save_path: str = "") -> Any:
     """Get a large-format drawing's rendered canvas image (PNG) - the raster you
@@ -1538,7 +1560,7 @@ def get_large_format_drawing_image(lfd_id: str, save_path: str = "") -> Any:
 #      x/y). .weldb panels give RECTANGULAR weld positions (a second point marks
 #      the opposite corner). Placing a rectangular weld as a bare point - or a
 #      point weld as a box - silently degrades the map. See 'create_map_item'.
-@mcp.tool()
+@_tool('List Map Items', read_only=True)
 @_safe
 def list_map_items(drawing_id: str = "", schema_id: str = "", status: str = "", search: str = "") -> str:
     """List map items (welds, flanges, fittings...) in the current project.
@@ -1555,7 +1577,7 @@ def list_map_items(drawing_id: str = "", schema_id: str = "", status: str = "", 
     return _render_list("Map items:", data)
 
 
-@mcp.tool()
+@_tool('Get Map Item', read_only=True)
 @_safe
 def get_map_item(item_id: str) -> str:
     """Get one map item's full record, including its position (x_position,
@@ -1567,7 +1589,7 @@ def get_map_item(item_id: str) -> str:
     return _pretty(client().get(f"/api/mapping/items/{item_id}/"))
 
 
-@mcp.tool()
+@_tool('Create Map Item')
 @_safe
 def create_map_item(
     drawing_id: str,
@@ -1652,7 +1674,7 @@ def create_map_item(
     return f"Created map item '{label}'.\n\n{_pretty(result)}"
 
 
-@mcp.tool()
+@_tool('Bulk Create Map Items')
 @_safe
 def bulk_create_map_items(drawing_id: str, schema_id: str, items: str) -> str:
     """Create many map items on ONE drawing in a single request (up to 500).
@@ -1708,7 +1730,7 @@ def bulk_create_map_items(drawing_id: str, schema_id: str, items: str) -> str:
     return f"Bulk-created {count} map item(s) on drawing {drawing_id}.\n\n{_pretty(result)}"
 
 
-@mcp.tool()
+@_tool('Bulk Update Map Items', destructive=True)
 @_safe
 def bulk_update_map_items(drawing_id: str, schema_id: str, items: str) -> str:
     """Edit the schema DATA fields of many existing map items on ONE drawing in a
@@ -1758,7 +1780,7 @@ def bulk_update_map_items(drawing_id: str, schema_id: str, items: str) -> str:
     return f"{msg}\n\n{_pretty(result)}"
 
 
-@mcp.tool()
+@_tool('Mark Map Item Complete', idempotent=True)
 @_safe
 def mark_map_item_complete(item_id: str) -> str:
     """Mark a map item complete. This is a buy-off recorded under YOUR name and
@@ -1770,7 +1792,7 @@ def mark_map_item_complete(item_id: str) -> str:
     )
 
 
-@mcp.tool()
+@_tool('Mark Map Item Accepted', idempotent=True)
 @_safe
 def mark_map_item_accepted(item_id: str) -> str:
     """Mark a map item accepted (must already be complete). This is a buy-off
@@ -1782,7 +1804,7 @@ def mark_map_item_accepted(item_id: str) -> str:
     )
 
 
-@mcp.tool()
+@_tool('List Repair Codes', read_only=True)
 @_safe
 def list_repair_codes() -> str:
     """List the repair codes used when adding a repair to a map item: R (Repair),
@@ -1791,7 +1813,7 @@ def list_repair_codes() -> str:
     return _render_list("Repair codes:", data, empty="No repair codes found.")
 
 
-@mcp.tool()
+@_tool('Add Map Item Repair')
 @_safe
 def add_map_item_repair(item_id: str, repair_code: str) -> str:
     """Record a repair against a map item (e.g. a weld). repair_code is one of
@@ -1872,7 +1894,7 @@ def _render_zipmap_result(result: Any, mode: str) -> str:
     return head + "\n\n" + "\n".join(lines) + "\n\n" + _pretty(result)
 
 
-@mcp.tool()
+@_tool('Inspect Zipmap', read_only=True)
 @_safe
 def inspect_zipmap(file_path: str) -> str:
     """Look inside a .zipmap (or .zipmap.json) WITHOUT uploading anything.
@@ -1954,7 +1976,7 @@ def inspect_zipmap(file_path: str) -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
+@_tool('Upload Zipmap')
 @_safe
 def upload_zipmap(
     file_path: str,
@@ -2066,7 +2088,7 @@ def upload_zipmap(
 # ===========================================================================
 # Fillable PDF templates
 # ===========================================================================
-@mcp.tool()
+@_tool('List Fillable Templates', read_only=True)
 @_safe
 def list_fillable_templates() -> str:
     """List document folders that publish a fillable PDF template (RIR, inspection
@@ -2076,7 +2098,7 @@ def list_fillable_templates() -> str:
     return _render_list("Fillable PDF templates:", data)
 
 
-@mcp.tool()
+@_tool('Get Fillable Template', read_only=True)
 @_safe
 def get_fillable_template(folder_id: str) -> str:
     """Read a fillable template's form fields and its project-resolved autofill
@@ -2085,7 +2107,7 @@ def get_fillable_template(folder_id: str) -> str:
     return _pretty(client().get(f"/api/documents/projects/{pid}/fillable-templates/{folder_id}/"))
 
 
-@mcp.tool(structured_output=False)
+@_tool('Download Fillable Template', structured_output=False)
 @_safe
 def download_fillable_template(folder_id: str, save_path: str = "") -> Any:
     """Download the blank fillable PDF for a folder so you can fill it in (ideally
@@ -2103,7 +2125,7 @@ def download_fillable_template(folder_id: str, save_path: str = "") -> Any:
     return _deliver_download(content, save_path or f"template-{folder_id}.pdf")
 
 
-@mcp.tool()
+@_tool('Submit Fillable Template')
 @_safe
 def submit_fillable_template(
     folder_id: str,
@@ -2137,7 +2159,7 @@ def submit_fillable_template(
 # ===========================================================================
 # Forms
 # ===========================================================================
-@mcp.tool()
+@_tool('List Form Submissions', read_only=True)
 @_safe
 def list_form_submissions(form_schema: str = "", status: str = "") -> str:
     """List inspection-form submissions in the current project. Optionally filter
@@ -2151,7 +2173,7 @@ def list_form_submissions(form_schema: str = "", status: str = "") -> str:
     return _render_list("Form submissions:", data)
 
 
-@mcp.tool()
+@_tool('Create Form Submission')
 @_safe
 def create_form_submission(
     form_schema: str,
@@ -2176,7 +2198,7 @@ def create_form_submission(
     return f"Created form submission.\n\n{_pretty(result)}"
 
 
-@mcp.tool()
+@_tool('Get Form Submission', read_only=True)
 @_safe
 def get_form_submission(submission_id: str) -> str:
     """Get one inspection-form submission, including its current field data and
@@ -2185,7 +2207,7 @@ def get_form_submission(submission_id: str) -> str:
     return _pretty(client().get(f"/api/forms/projects/{pid}/submissions/{submission_id}/"))
 
 
-@mcp.tool()
+@_tool('Update Form Submission', destructive=True)
 @_safe
 def update_form_submission(
     submission_id: str,
@@ -2212,7 +2234,7 @@ def update_form_submission(
     return f"Form submission {submission_id} updated.\n\n{_pretty(result)}"
 
 
-@mcp.tool()
+@_tool('Complete Form Submission', idempotent=True)
 @_safe
 def complete_form_submission(submission_id: str) -> str:
     """Mark a form submission complete. Completed forms are evidence that can
@@ -2232,7 +2254,7 @@ def complete_form_submission(submission_id: str) -> str:
 _NOTE_SEVERITIES = ("severe_issue", "issue", "questionable", "neutral", "positive")
 
 
-@mcp.tool()
+@_tool('Create Note')
 @_safe
 def create_note(
     content: str,
@@ -2263,7 +2285,7 @@ def create_note(
     return f"Note created.\n\n{_pretty(result)}"
 
 
-@mcp.tool()
+@_tool('List Notes', read_only=True)
 @_safe
 def list_notes(status: str = "all") -> str:
     """List the public notes feed for the current project. status can be 'all'
@@ -2275,7 +2297,7 @@ def list_notes(status: str = "all") -> str:
     return _render_list("Notes:", data)
 
 
-@mcp.tool()
+@_tool('Resolve Note', idempotent=True)
 @_safe
 def resolve_note(note_id: str, resolution: str = "") -> str:
     """Mark a note resolved, with an optional resolution comment."""
@@ -2288,7 +2310,7 @@ def resolve_note(note_id: str, resolution: str = "") -> str:
 # ===========================================================================
 # ITP line items
 # ===========================================================================
-@mcp.tool()
+@_tool('List ITP Line Items', read_only=True)
 @_safe
 def list_itp_line_items(
     package: str = "",
@@ -2310,7 +2332,7 @@ def list_itp_line_items(
     return _render_list("ITP line items:", data)
 
 
-@mcp.tool()
+@_tool('Get ITP Line Item', read_only=True)
 @_safe
 def get_itp_line_item(item_id: str) -> str:
     """Get one ITP line item, including its activity, acceptance criteria, evidence
@@ -2319,7 +2341,7 @@ def get_itp_line_item(item_id: str) -> str:
     return _pretty(client().get(f"/api/packages/projects/{pid}/itp-line-items/{item_id}/"))
 
 
-@mcp.tool()
+@_tool('Create ITP Line Item')
 @_safe
 def create_itp_line_item(
     package: str,
@@ -2365,7 +2387,7 @@ def create_itp_line_item(
     return f"Created ITP line item.\n\n{_pretty(result)}"
 
 
-@mcp.tool()
+@_tool('Update ITP Line Item', destructive=True)
 @_safe
 def update_itp_line_item(
     item_id: str,
@@ -2414,7 +2436,7 @@ def update_itp_line_item(
     return f"ITP line item {item_id} updated.\n\n{_pretty(result)}"
 
 
-@mcp.tool()
+@_tool('Mark ITP Complete', idempotent=True)
 @_safe
 def mark_itp_complete(item_id: str) -> str:
     """Mark an ITP line item complete. This is a buy-off recorded under YOUR name.
@@ -2425,7 +2447,7 @@ def mark_itp_complete(item_id: str) -> str:
     return f"ITP line item {item_id} marked complete (recorded as your sign-off).\n\n{_pretty(result)}"
 
 
-@mcp.tool()
+@_tool('Mark ITP Accepted', idempotent=True)
 @_safe
 def mark_itp_accepted(item_id: str) -> str:
     """Mark an ITP line item accepted (must already be complete). This is a buy-off
@@ -2499,7 +2521,7 @@ def _check_lock_item_type(item_type: str) -> str:
     return it
 
 
-@mcp.tool()
+@_tool('List Lock Types', read_only=True)
 @_safe
 def list_lock_types() -> str:
     """List the quality-hold lock TYPES defined for this project. A lock type is a
@@ -2521,7 +2543,7 @@ def list_lock_types() -> str:
     return _render_list("Lock types (quality hold points):", data, empty="No lock types defined.")
 
 
-@mcp.tool()
+@_tool('List Locks', read_only=True)
 @_safe
 def list_locks(status: str = "", item_type: str = "", item_id: str = "") -> str:
     """List the quality-hold locks (construction witness/hold points) placed in the
@@ -2546,7 +2568,7 @@ def list_locks(status: str = "", item_type: str = "", item_id: str = "") -> str:
     return _render_list("Quality-hold locks:", data, empty="No locks.")
 
 
-@mcp.tool()
+@_tool('Get Lock', read_only=True)
 @_safe
 def get_lock(lock_id: str) -> str:
     """Get one quality-hold lock's full record: its type (what must be verified),
@@ -2559,7 +2581,7 @@ def get_lock(lock_id: str) -> str:
     return _pretty(client().get(f"/api/locks/projects/{pid}/locks/{lock_id}/"))
 
 
-@mcp.tool()
+@_tool('Add Lock')
 @_safe
 def add_lock(
     lock_type_id: str,
@@ -2607,7 +2629,7 @@ def add_lock(
     )
 
 
-@mcp.tool()
+@_tool('Unlock Lock')
 @_safe
 def unlock_lock(lock_id: str) -> str:
     """Clear the hold on a quality-hold lock (mark it unlocked) - i.e. record that
@@ -2630,7 +2652,7 @@ def unlock_lock(lock_id: str) -> str:
     )
 
 
-@mcp.tool()
+@_tool('Assign Lock')
 @_safe
 def assign_lock(lock_id: str, assigned_to: str = "", assigned_user_type: str = "") -> str:
     """Set who a quality-hold lock is assigned to - the person/user type expected to
@@ -2656,7 +2678,7 @@ def assign_lock(lock_id: str, assigned_to: str = "", assigned_user_type: str = "
     return f"Lock {lock_id} {verb}.\n{_LOCK_OWNER_REMINDER}\n\n{_pretty(result)}"
 
 
-@mcp.tool()
+@_tool('Delete Lock', destructive=True)
 @_safe
 def delete_lock(lock_id: str) -> str:
     """Withdraw a quality-hold lock. This is a SOFT delete: the lock is stamped with
@@ -2685,7 +2707,7 @@ def delete_lock(lock_id: str) -> str:
 # ===========================================================================
 # Photos
 # ===========================================================================
-@mcp.tool()
+@_tool('List Photos', read_only=True)
 @_safe
 def list_photos(object_type: str, object_id: str) -> str:
     """List the photos attached to an object. object_type is one of drawing,
@@ -2695,7 +2717,7 @@ def list_photos(object_type: str, object_id: str) -> str:
     return _render_list(f"Photos on {object_type} {object_id}:", data)
 
 
-@mcp.tool()
+@_tool('Attach Photo')
 @_safe
 def attach_photo(object_type: str, object_id: str, file_path: str, caption: str = "") -> str:
     """Attach a photo to an object. object_type is one of drawing, formsubmission,
@@ -2717,7 +2739,7 @@ def attach_photo(object_type: str, object_id: str, file_path: str, caption: str 
 # ===========================================================================
 # References & reference requests - the heart of turnover
 # ===========================================================================
-@mcp.tool()
+@_tool('List Reference Requests', read_only=True)
 @_safe
 def list_reference_requests(status: str = "open", assigned_to: str = "") -> str:
     """List reference requests - the tracked 'still-needs-proof' items. By default
@@ -2734,7 +2756,7 @@ def list_reference_requests(status: str = "open", assigned_to: str = "") -> str:
     return _render_list("Reference requests:", data, empty="No matching reference requests.")
 
 
-@mcp.tool()
+@_tool('Create Reference Request')
 @_safe
 def create_reference_request(
     item_type: str,
@@ -2769,7 +2791,7 @@ def create_reference_request(
     return f"Reference request created.\n\n{_pretty(result)}"
 
 
-@mcp.tool()
+@_tool('List References', read_only=True)
 @_safe
 def list_references(source_type: str, source_id: str) -> str:
     """List the references already attached to a source item. source_type is
@@ -2779,7 +2801,7 @@ def list_references(source_type: str, source_id: str) -> str:
     return _render_list(f"References on {source_type} {source_id}:", data)
 
 
-@mcp.tool()
+@_tool('Create Reference')
 @_safe
 def create_reference(
     source_type: str,
@@ -2808,7 +2830,7 @@ def create_reference(
     )
 
 
-@mcp.tool()
+@_tool('Turnover Report', read_only=True)
 @_safe
 def turnover_report() -> str:
     """Summarize how close the current project is to a complete turnover package:
@@ -2862,7 +2884,7 @@ def turnover_report() -> str:
 # ===========================================================================
 # Shippers (received material - read only)
 # ===========================================================================
-@mcp.tool()
+@_tool('List Shippers', read_only=True)
 @_safe
 def list_shippers(search: str = "") -> str:
     """List the shippers (incoming shipments / receiving records) in the current
@@ -2872,7 +2894,7 @@ def list_shippers(search: str = "") -> str:
     return _render_list("Shippers:", data)
 
 
-@mcp.tool()
+@_tool('List Shipper Line Items', read_only=True)
 @_safe
 def list_shipper_line_items(shipper_id: str, search: str = "") -> str:
     """List the line items (received materials, with quantities and heat numbers)
@@ -2887,7 +2909,7 @@ def list_shipper_line_items(shipper_id: str, search: str = "") -> str:
 # ===========================================================================
 # QR codes
 # ===========================================================================
-@mcp.tool(structured_output=False)
+@_tool('Generate QR Code', structured_output=False)
 @_safe
 def generate_qr_code(url: str, save_path: str = "") -> Any:
     """Generate a QR code (and short URL) for an internal QC Database app path,
@@ -2948,7 +2970,7 @@ _SEARCH_TYPES = {
 }
 
 
-@mcp.tool()
+@_tool('Semantic Search', read_only=True)
 @_safe
 def semantic_search(item_type: str, query: str, limit: int = 5) -> str:
     """Meaning-based search across the current project, ranked by relevance. Unlike
@@ -2975,7 +2997,7 @@ def semantic_search(item_type: str, query: str, limit: int = 5) -> str:
 # ===========================================================================
 # User manual (how QC Database works - global product documentation)
 # ===========================================================================
-@mcp.tool()
+@_tool('Search User Manual', read_only=True)
 @_safe
 def search_user_manual(query: str, limit: int = 3) -> str:
     """Ask how QC Database itself works. Semantic search over the QC Database USER
@@ -2990,7 +3012,7 @@ def search_user_manual(query: str, limit: int = 3) -> str:
     return _render_manual_search(payload)
 
 
-@mcp.tool()
+@_tool('List User Manual', read_only=True)
 @_safe
 def list_user_manual() -> str:
     """Show the QC Database user manual's table of contents - every help section
