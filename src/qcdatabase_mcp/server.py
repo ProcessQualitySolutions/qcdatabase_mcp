@@ -1341,6 +1341,77 @@ def get_drawing(drawing_id: str) -> str:
     return _pretty(client().get(f"/api/drawings/{drawing_id}/"))
 
 
+@_tool('Update Drawing', destructive=True, idempotent=True)
+@_safe
+def update_drawing(
+    drawing_id: str,
+    drawing_number: Optional[str] = None,
+    title: Optional[str] = None,
+    line_number: Optional[str] = None,
+    sheet_number: Optional[str] = None,
+    revision: Optional[str] = None,
+) -> str:
+    """Update identifying metadata on a drawing record in the active project.
+
+    Use 'list_drawings' to discover drawing ids and 'get_drawing' to inspect the
+    current record first. This edits the drawing record, not its extraction
+    schema, and it cannot move a drawing into or out of a package.
+
+    Omit a field to leave it unchanged. An empty drawing_number, line_number, or
+    sheet_number clears that field. Title and revision must be nonblank when
+    supplied.
+    """
+    pid = require_project()
+    payload: dict[str, str] = {}
+    blank_allowed = {"drawing_number", "line_number", "sheet_number"}
+    max_lengths = {
+        "drawing_number": 100,
+        "title": 255,
+        "line_number": 100,
+        "sheet_number": 20,
+        "revision": 20,
+    }
+    fields = {
+        "drawing_number": drawing_number,
+        "title": title,
+        "line_number": line_number,
+        "sheet_number": sheet_number,
+        "revision": revision,
+    }
+    for name, value in fields.items():
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            raise ValueError(f"'{name}' must be a string.")
+        if name not in blank_allowed and not value.strip():
+            raise ValueError(f"'{name}' must not be blank.")
+        if len(value) > max_lengths[name]:
+            raise ValueError(
+                f"'{name}' must be at most {max_lengths[name]} characters."
+            )
+        payload[name] = value
+    if not payload:
+        return "Nothing to update. Supply drawing metadata to change."
+
+    c = client()
+    current = c.get(f"/api/drawings/{drawing_id}/")
+    drawing_project = current.get("project") if isinstance(current, dict) else None
+    if isinstance(drawing_project, dict):
+        drawing_project = drawing_project.get("id")
+    if not drawing_project:
+        raise ValueError(
+            f"Drawing {drawing_id} has no project in its API record; refusing to update it."
+        )
+    if str(drawing_project) != str(pid):
+        raise ValueError(
+            f"Drawing {drawing_id} belongs to project {drawing_project}, not the active "
+            f"project {pid}; refusing to update it."
+        )
+
+    result = c.patch(f"/api/drawings/{drawing_id}/", json=payload)
+    return f"Drawing {drawing_id} updated.\n\n{_pretty(result)}"
+
+
 @_tool('Upload Drawing')
 @_safe
 def upload_drawing(file_path: str, do_not_extract: bool = False) -> str:
