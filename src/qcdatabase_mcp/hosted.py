@@ -92,7 +92,7 @@ def issuer_url() -> str:
 
 
 def resource_url() -> str:
-    """This MCP server's own public URL (the OAuth resource identifier).
+    """This server's public base URL, also used for pages and file transfers.
 
     In production set ``QCDB_MCP_RESOURCE_URL`` to e.g. ``https://mcp.qcdatabase.ai``.
     For a loopback dev bind we derive a sensible default.
@@ -101,6 +101,11 @@ def resource_url() -> str:
     if explicit:
         return explicit.rstrip("/")
     return f"http://{bind_host()}:{bind_port()}"
+
+
+def mcp_resource_url() -> str:
+    """Canonical OAuth resource: the endpoint URL clients actually connect to."""
+    return resource_url() + "/mcp"
 
 
 def _env_flag(name: str, default: str) -> bool:
@@ -154,7 +159,7 @@ def auth_settings() -> AuthSettings:
     """OAuth resource-server settings: which AS to trust, and our resource id."""
     return AuthSettings(
         issuer_url=issuer_url(),
-        resource_server_url=resource_url(),
+        resource_server_url=mcp_resource_url(),
         required_scopes=None,  # per-endpoint scopes are enforced by the API itself
     )
 
@@ -237,7 +242,7 @@ def _access_token_from_whoami(token: str, data: object) -> AccessToken | None:
         client_id=str((data.get("client_id") if isinstance(data, dict) else None) or "qcdatabase-mcp"),
         scopes=_scopes_of(data),
         subject=subject,
-        resource=resource_url(),
+        resource=mcp_resource_url(),
         claims=data if isinstance(data, dict) else None,
     )
 
@@ -324,7 +329,7 @@ class QCDBTokenVerifier(TokenVerifier):
                     client_id=identity.client_id,
                     scopes=identity.scopes,
                     subject=identity.subject,
-                    resource=resource_url(),
+                    resource=mcp_resource_url(),
                     claims=identity.claims,
                 )
 

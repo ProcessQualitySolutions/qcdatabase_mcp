@@ -5,6 +5,25 @@ The hosted MCP server validates the caller's bearer token using QCDatabase
 and returning a top-level user `id`, `tenant`, and `scopes`. Hosted OAuth token
 exchange and refresh belong to the MCP client, not the local `login` flow.
 
+## Claude discovery requirements
+
+The connector URL is `https://mcp.qcdatabase.ai/mcp`. Claude's
+[authentication documentation](https://claude.com/docs/connectors/building/authentication#serve-discovery-metadata)
+requires the advertised resource to match the connector URL, including its path.
+Advertising only the origin is not sufficient. Resource metadata and token
+identity now use the full `/mcp` endpoint, and the 401 challenge points to
+`/.well-known/oauth-protected-resource/mcp`. Root discovery remains an alias
+returning the same metadata for existing clients.
+
+Keep `QCDB_MCP_RESOURCE_URL` / `--resource-url` configured as the public **base**
+URL without `/mcp`: the server adds the endpoint path for OAuth, while pages and
+file-transfer links continue to use the base. Do not append `/mcp` to that setting.
+The corrected metadata reaches production only after publishing.
+
+Missing-bearer 401s can be normal OAuth discovery probes; they do not prove that
+a completed authorization lost its token. Correlate the actual flow before
+diagnosing a client or authorization-server failure.
+
 ## Failure categories
 
 - Missing or rejected credentials: HTTP 401 with the standard OAuth challenge.

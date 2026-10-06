@@ -118,7 +118,20 @@ def test_discovery_resource(auth_app):
     client, _, _ = auth_app
     r = client.get("/.well-known/oauth-protected-resource")
     assert r.status_code == 200
-    assert r.json()["resource"] == "https://mcp.example.test/"
+    assert r.json()["resource"] == "https://mcp.example.test/mcp"
+    path_specific = client.get("/.well-known/oauth-protected-resource/mcp")
+    assert path_specific.status_code == 200
+    assert path_specific.json() == r.json()
+    challenge = rpc(client, token=None)
+    assert 'resource_metadata="https://mcp.example.test/.well-known/oauth-protected-resource/mcp"' in challenge.headers["www-authenticate"]
+
+
+def test_resource_identity_matches_endpoint_without_changing_base(monkeypatch):
+    monkeypatch.setenv("QCDB_MCP_RESOURCE_URL", "https://mcp.example.test/")
+    assert hosted.resource_url() == "https://mcp.example.test"
+    assert hosted.mcp_resource_url() == "https://mcp.example.test/mcp"
+    access = hosted._access_token_from_whoami("synthetic", {"id": "test-user"})
+    assert access.resource == str(hosted.auth_settings().resource_server_url)
 
 
 def test_hosted_login_does_not_suggest_reconnecting(monkeypatch):

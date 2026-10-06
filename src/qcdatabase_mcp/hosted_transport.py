@@ -4,6 +4,7 @@ import logging
 
 from mcp.server.fastmcp import FastMCP
 from starlette.responses import JSONResponse
+from starlette.routing import Route
 
 from .hosted import VerificationUnavailable
 
@@ -52,5 +53,17 @@ class VerificationErrorMiddleware:
 class HostedFastMCP(FastMCP):
     def streamable_http_app(self):
         app = super().streamable_http_app()
+        # The SDK serves path-specific metadata for the /mcp resource. Preserve
+        # root discovery for existing clients, using the very same handler.
+        from mcp.server.auth.routes import build_resource_metadata_url
+        from urllib.parse import urlparse
+
+        resource = self.settings.auth.resource_server_url if self.settings.auth else None
+        if resource:
+            metadata_path = urlparse(str(build_resource_metadata_url(resource))).path
+            root = "/.well-known/oauth-protected-resource"
+            if metadata_path != root:
+                route = next(r for r in app.routes if r.path == metadata_path)
+                app.routes.append(Route(root, endpoint=route.endpoint, methods=["GET", "OPTIONS"]))
         app.add_middleware(VerificationErrorMiddleware)
         return app

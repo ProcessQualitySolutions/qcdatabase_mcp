@@ -110,8 +110,8 @@ def main() -> None:
     print(
         "Hosted mode (OAuth resource server):\n"
         f"  serving on    {args.host}:{args.port}\n"
-        f"  resource id   {hosted.resource_url()}\n"
-        f"  mcp endpoint  {hosted.resource_url()}/mcp\n"
+        f"  resource id   {hosted.mcp_resource_url()}\n"
+        f"  mcp endpoint  {hosted.mcp_resource_url()}\n"
         f"  home page     {hosted.resource_url()}/  (health: /health)\n"
         f"  auth server   {hosted.issuer_url()}\n"
         f"  transport     stateless={'on' if hosted.stateless_enabled() else 'off'}, "
