@@ -26,6 +26,7 @@ import sys
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import quote
+from uuid import UUID
 
 import httpx
 from mcp.server.fastmcp import FastMCP
@@ -957,7 +958,8 @@ def list_map_item_schemas() -> str:
     """List the map item schemas in this project, with the custom fields each one
     defines. A schema (e.g. 'Weld', 'Flange', 'Support') fixes what data a map item
     of that type carries, so you need both its id AND its field list before creating
-    any.
+    any. Discovery is read-only: MCP never creates, edits, or promotes map-item
+    type definitions. Record creation and editing use existing schemas only.
 
     DO THIS FIRST, before 'create_map_item', 'bulk_create_map_items' or
     'upload_zipmap'. Fetching the schema up front lets you (1) place onto the RIGHT
@@ -1357,7 +1359,8 @@ def update_drawing(
 
     Use 'list_drawings' to discover drawing ids and 'get_drawing' to inspect the
     current record first. This edits the drawing record, not its extraction
-    schema, and it cannot move a drawing into or out of a package.
+    schema, and it cannot move a drawing into or out of a package. Use
+    'move_drawing_to_package' for assignment to an existing package.
 
     Omit a field to leave it unchanged. An empty drawing_number, line_number, or
     sheet_number clears that field. Title and revision must be nonblank when
@@ -1412,6 +1415,55 @@ def update_drawing(
 
     result = c.patch(f"/api/drawings/{drawing_id}/", json=payload)
     return f"Drawing {drawing_id} updated.\n\n{_pretty(result)}"
+
+
+@_tool('Move Drawing to Package', destructive=True, idempotent=True)
+@_safe
+def move_drawing_to_package(drawing_id: str, destination_package_id: str) -> str:
+    """Move an existing drawing to an existing package in the active project.
+
+    Discover ids with 'list_drawings' and 'list_packages'. Both records must
+    belong to the active project. Only the drawing's package field is PATCHed:
+    no upload, duplication, metadata edit, package removal, or project transfer.
+    This is NOT placement of package tags on a large-format drawing (LFD).
+    Already-assigned drawings return their current record without a write.
+    """
+    pid = require_project()
+    ids = {}
+    for name, value in (
+        ("drawing_id", drawing_id),
+        ("destination_package_id", destination_package_id),
+    ):
+        try:
+            if not isinstance(value, str):
+                raise ValueError
+            ids[name] = str(UUID(value))
+        except (ValueError, AttributeError):
+            raise ValueError(f"'{name}' must be a nonempty UUID.") from None
+    drawing_id = ids["drawing_id"]
+    destination_package_id = ids["destination_package_id"]
+    c = client()
+    current = c.get(f"/api/drawings/{drawing_id}/")
+    for label, record in (
+        ("Drawing", current),
+        ("Destination package", c.get(f"/api/packages/{destination_package_id}/")),
+    ):
+        project = record.get("project") if isinstance(record, dict) else None
+        if isinstance(project, dict):
+            project = project.get("id")
+        if not project:
+            raise ValueError(f"{label} has no project in its API record; refusing to move.")
+        if str(project).lower() != str(pid).lower():
+            raise ValueError(f"{label} belongs to project {project}, not the active project {pid}.")
+    package = current.get("package")
+    if isinstance(package, dict):
+        package = package.get("id")
+    if str(package).lower() == destination_package_id:
+        return f"Drawing already assigned to this package; no changes made.\n\n{_pretty(current)}"
+    result = c.patch(
+        f"/api/drawings/{drawing_id}/", json={"package": destination_package_id}
+    )
+    return f"Drawing moved to package {destination_package_id}.\n\n{_pretty(result)}"
 
 
 @_tool('Upload Drawing')
@@ -1677,7 +1729,8 @@ def create_map_item(
     notes: str = "",
     data: str = "",
 ) -> str:
-    """Create a map item (a weld, flange, fitting...) pinned to a drawing.
+    """Create a map item record (a weld, flange, fitting...) pinned to a drawing.
+    Uses an existing schema; never creates or modifies a map-item type definition.
 
     FETCH THE SCHEMA FIRST. Call 'list_map_item_schemas' before creating anything:
     choose the schema that matches what you're placing and read its field list, so
@@ -2062,7 +2115,8 @@ def upload_zipmap(
     in ONE transactional request. This is the streamlined way to bring in a weld map
     your own AI or CAD/takeoff tooling produced: QC Database creates the drawing, all
     of its map items across every schema, and its extracted-data record together, or
-    creates nothing at all. No server-side AI runs on it.
+    creates nothing at all. No server-side AI runs on it. Imports bind to existing
+    schema ids only; they do not create, edit, or promote map-item types.
 
     'file_path' is a .zipmap archive, the folder one was unpacked from, or an
     already-flattened .zipmap.json document. On a hosted server, call

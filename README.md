@@ -200,7 +200,9 @@ Then ask Claude to **"connect to QC Database"** to sign in — see below.
   `upload_large_format_drawing_version`, `attach_photo`
 - **Drawings:** `list_drawings`, `get_drawing` (incl. pixel width/height — the
   HTML5-canvas coordinate space for map items), `export_drawing`,
-  `export_large_format_drawing`
+  `export_large_format_drawing`, `update_drawing` (identifying metadata),
+  `move_drawing_to_package` (existing drawing and destination in the active
+  project; only changes package assignment, without uploading or duplicating)
 - **Fillable PDF forms:** `list_fillable_templates`, `get_fillable_template`,
   `download_fillable_template`, `submit_fillable_template`
 - **Structured data:** `get_document`, `set_document_extracted_data`,
@@ -244,6 +246,17 @@ Then ask Claude to **"connect to QC Database"** to sign in — see below.
 ---
 
 ## A companion to CAD, PCF, and .weldb systems
+
+Map-item **type definitions are read-only in MCP**: discovery is available, but
+no create/edit/promote operation is exposed. Record edits and imports bind to
+existing schema IDs; archive schemas are not installed as new types.
+
+List and document type creation/editing are **permitted**, but blocked by missing
+API write contracts. Document folder moves and package tags placed on LFDs are
+also API-blocked; moving a drawing to a package is not an LFD package tag.
+See the [API handoff](docs/management-api-handoff.md) for the exact gaps.
+Hosted production needs a republish and refreshed client tool discovery before
+new tools appear; development verification alone does not update production.
 
 This server is a natural partner to the systems that already describe your
 geometry — CAD/CAE exports, **PCF** piping files, and **.weldb** boilermaker

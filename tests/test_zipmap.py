@@ -179,6 +179,23 @@ def test_build_document_shape():
     assert info["items"] == 2
 
 
+def test_archive_type_definitions_are_not_sent_to_ingest():
+    members = _members(**{
+        "schemata/weld.schema.json": json.dumps({
+            "zipmap": {"schema_id": "existing-schema"},
+            "schema_definition": {"new_field": "must not install"},
+            "promoted_from": "another-type",
+            "properties": {"size": {"type": "string"}},
+        }).encode(),
+    })
+    doc, _ = zm.build_document(members)
+    assert doc["map_item_datasets"] == [
+        {"schema_id": "existing-schema", "map_items": WELD_ITEMS}
+    ]
+    assert "schema_definition" not in json.dumps(doc)
+    assert "promoted_from" not in json.dumps(doc)
+
+
 def test_folder_source_omits_unverified_page_count():
     doc, _ = zm.build_document(
         _members(**{"pdf/drawing.pdf": b"%PDF-1.4\n%%EOF"}),

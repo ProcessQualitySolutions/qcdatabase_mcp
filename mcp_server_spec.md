@@ -176,6 +176,24 @@ endpoints.
 
 ## 4. Capability surface (by domain)
 
+### Reference implementation management boundaries
+
+`move_drawing_to_package` reads drawing and destination package details, verifies
+both belong to the active project, and PATCHes only `package` on the drawing.
+No-op assignments do not write. `update_drawing` remains metadata-only (number,
+title, line number, sheet number, revision).
+
+MCP MUST NOT create, edit, promote, or otherwise mutate map-item type definitions.
+Schema discovery and record-level edits/imports using existing schema IDs remain
+available. This restriction does **not** prohibit list/document type creation or
+editing: those are permitted but lack write contracts in the supplied API 3.1.0
+reference. Document folder moves and LFD package-tag placement are also blocked
+on contracts, not implemented via metadata or guessed endpoints.
+See [Management API handoff](docs/management-api-handoff.md) for evidence,
+the document PATCH prose/schema contradiction, and backend requirements.
+
+### Domain overview
+
 The following domains are available; consult the OpenAPI schema for the exhaustive
 list of paths, parameters, and payloads. Paths below are representative, not
 complete.
