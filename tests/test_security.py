@@ -313,7 +313,8 @@ def test_verifier_negative_caches_failure():
 def test_verifier_200_without_id_is_unverified():
     v = hosted.QCDBTokenVerifier()
     v._http = _FakeHTTP(200, {"email": "x"})  # no user id
-    assert asyncio.run(v.verify_token("tok")) is None
+    with pytest.raises(hosted.VerificationUnavailable):
+        asyncio.run(v.verify_token("tok"))
 
 
 def test_verifier_cache_key_is_hashed():

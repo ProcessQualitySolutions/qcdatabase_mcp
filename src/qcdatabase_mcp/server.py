@@ -57,13 +57,14 @@ except Exception:  # pragma: no cover - absence is a valid deployment shape
 # Auth is configured at construction time, so the FastMCP instance itself differs
 # between the two modes.
 if hosted.hosted_enabled():
+    from .hosted_transport import HostedFastMCP
     # Enforce hosted config here, not only in the CLI, so an import-only launch
     # (gunicorn wrapper, `python -c`) can't bypass the checks and serve with a
     # wrong resource id / mis-seeded allow-lists.
     _config_errors = hosted.validate_config()
     if _config_errors:
         raise RuntimeError("Invalid hosted-mode configuration: " + " ".join(_config_errors))
-    mcp = FastMCP(
+    mcp = HostedFastMCP(
         "qcdatabase",
         host=hosted.bind_host(),
         port=hosted.bind_port(),
@@ -725,11 +726,12 @@ def login() -> str:
     connection is then remembered. You choose the project separately with
     'set_project'."""
     if hosted.hosted_enabled():
+        # Reaching this tool already requires a validated bearer token.
+        client()
         return (
-            "This is a hosted QC Database server - you sign in through your MCP "
-            "client's own connection flow, not with this tool. If tools report you "
-            "are not authenticated, reconnect / re-authorize QC Database in your "
-            "client. Then run 'set_project' to choose a project."
+            "You are authenticated through your MCP client's QC Database connection. "
+            "No additional login is needed. Run 'whoami' to check your identity, "
+            "then 'set_project' to choose a project."
         )
     c = client()
     info = run_login(c.store, c.port)

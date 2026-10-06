@@ -40,6 +40,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import logging
 import os
 import threading
 import time
@@ -56,6 +57,15 @@ _TRUTHY = {"1", "true", "yes", "on"}
 _LOOPBACK_HOSTS = {"", "127.0.0.1", "::1", "localhost"}
 _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = "8000"
+_log = logging.getLogger(__name__)
+
+
+class VerificationUnavailable(RuntimeError):
+    """Identity could not be checked; this is not evidence of an invalid token."""
+
+    def __init__(self, status_code: int = 503):
+        self.status_code = status_code
+        super().__init__("QC Database identity verification unavailable")
 
 
 # ---------------------------------------------------------------------------
@@ -324,13 +334,25 @@ class QCDBTokenVerifier(TokenVerifier):
                 "/api/whoami/", headers={"Authorization": f"Bearer {token}"}
             )
         except httpx.HTTPError:
-            return None  # transient network trouble: don't cache, re-check next time
+            _log.warning("auth_verification outcome=network_error")
+            raise VerificationUnavailable() from None
         if resp.status_code == 200:
             try:
                 data = resp.json()
             except ValueError:
-                data = {}
+                _log.warning("auth_verification outcome=invalid_json")
+                raise VerificationUnavailable() from None
             access = _access_token_from_whoami(token, data)
+            if access is None:
+                _log.warning("auth_verification outcome=missing_identity")
+                raise VerificationUnavailable()
+        elif resp.status_code != 401:
+            # Only an explicit unauthorized response proves token rejection.
+            # Do not poison the credential cache with outages or scope failures.
+            _log.warning("auth_verification outcome=upstream_error status=%s", resp.status_code)
+            raise VerificationUnavailable(403 if resp.status_code == 403 else 503)
+        else:
+            _log.info("auth_verification outcome=token_rejected")
 
         # Store only derived identity, not the raw token.
         identity_to_cache: _CachedIdentity | None = (
