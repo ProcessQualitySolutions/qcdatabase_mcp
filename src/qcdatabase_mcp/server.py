@@ -3172,7 +3172,12 @@ def list_user_manual() -> str:
 # trainings have no project. Publishing, delisting, reassigning owners and
 # setting permission requirements are deliberately UI-only.
 _TRAININGS_SCOPE_MSG = "does not grant the scope required"
-_BUNDLE_SKIP_DIRS = {"node_modules", ".git"}
+_BUNDLE_SKIP_DIRS = {"node_modules", "__MACOSX"}
+_BUNDLE_SKIP_FILES = {"thumbs.db", "desktop.ini"}
+# The bundle limits (redline.school SPEC section 2); the Worker enforces them too.
+_BUNDLE_MAX_FILES = 100
+_BUNDLE_MAX_BYTES = 25 * 1024 * 1024
+_REDLINE_DOMAIN = "redline.school"
 
 
 def _trainings(fn):
@@ -3202,29 +3207,122 @@ def _training_scope_params(scope: str, project_id: str) -> dict[str, Any]:
     return {"scope": scope or None, "project_id": project_id or None}
 
 
-def _bundle_manifest(folder_path: str) -> list[dict[str, Any]]:
-    """stdio only: list a training bundle folder as {path, size, sha256}, the way
-    `npx @redline/dev upload` does. Reads go through the guarded helpers."""
-    import hashlib
+def _bundle_files(folder_path: str) -> list[tuple[str, bytes]]:
+    """stdio only: read a training bundle folder as [(relative path, bytes)].
+
+    Skips what is never part of a bundle (dot-files and dot-folders, which
+    redline.school rejects, node_modules, archive debris) and stops at the
+    bundle limits. Reads go through the guarded helpers."""
     import os
 
     root = _guard_local_path(Path(folder_path), write=False)
     if not root.is_dir():
         raise FileNotFoundError(f"No folder at: {folder_path}")
-    files: list[dict[str, Any]] = []
+    files: list[tuple[str, bytes]] = []
+    total = 0
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = sorted(d for d in dirnames if d not in _BUNDLE_SKIP_DIRS)
+        dirnames[:] = sorted(d for d in dirnames if d not in _BUNDLE_SKIP_DIRS and not d.startswith("."))
         for name in sorted(filenames):
+            if name.startswith(".") or name.lower() in _BUNDLE_SKIP_FILES:
+                continue
             full = Path(dirpath) / name
             content = _read_bytes(full)
-            files.append({
-                "path": full.relative_to(root).as_posix(),
-                "size": len(content),
-                "sha256": hashlib.sha256(content).hexdigest(),
-            })
-            if len(files) > 1000:
-                raise ValueError("That folder has over 1000 files; is it really a training bundle?")
+            total += len(content)
+            files.append((full.relative_to(root).as_posix(), content))
+            if len(files) > _BUNDLE_MAX_FILES:
+                raise ValueError(f"That folder has over {_BUNDLE_MAX_FILES} files; a bundle may have at most "
+                                 f"{_BUNDLE_MAX_FILES}. Is it really a training bundle?")
+            if total > _BUNDLE_MAX_BYTES:
+                raise ValueError("That folder is over 25 MB; a bundle may be at most 25 MB.")
+    if not files:
+        raise ValueError(f"The folder '{folder_path}' has no files in it.")
     return files
+
+
+def _bundle_manifest(folder_path: str) -> list[dict[str, Any]]:
+    """stdio only: list a training bundle folder as {path, size, sha256}."""
+    import hashlib
+
+    return [{"path": path, "size": len(content), "sha256": hashlib.sha256(content).hexdigest()}
+            for path, content in _bundle_files(folder_path)]
+
+
+def _zip_bundle(files: list[tuple[str, bytes]]) -> bytes:
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for path, content in files:
+            zf.writestr(path, content)
+    return buf.getvalue()
+
+
+def _redline_url(url: str) -> str:
+    """Only ever send bundle bytes to (or fetch templates from) redline.school
+    over HTTPS, whatever a response says."""
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url or "")
+    host = (parts.hostname or "").lower()
+    if parts.scheme != "https" or not (host == _REDLINE_DOMAIN or host.endswith("." + _REDLINE_DOMAIN)):
+        raise APIError(f"Refusing to use a non-redline.school URL: {url!r}")
+    return url
+
+
+def _redline_http() -> httpx.Client:
+    # A plain client: the QC Database token is never sent to redline.school.
+    # The signed upload URL is the only credential an upload needs.
+    return httpx.Client(timeout=120.0, follow_redirects=False)
+
+
+def _put_bundle_zip(zip_url: str, data: bytes) -> dict[str, Any]:
+    with _redline_http() as http:
+        res = http.put(_redline_url(zip_url), content=data, headers={"Content-Type": "application/zip"})
+    try:
+        body = res.json()
+    except ValueError:
+        body = {}
+    if res.status_code == 422 and isinstance(body, dict) and body.get("status") == "rejected":
+        return body
+    if res.status_code >= 400:
+        if isinstance(body, dict) and body.get("error"):
+            detail = f"{body['error']}: {body.get('detail') or ''}".rstrip(": ")
+        else:
+            detail = res.text[:300]
+        raise APIError(f"redline.school refused the upload ({res.status_code}): {detail}")
+    return body if isinstance(body, dict) else {}
+
+
+def _unpack_to_folder(content: bytes, folder: str) -> str:
+    """stdio only: write a zip's files into a new or empty folder. Each member
+    is checked (relative, no dot segments) and written through the guarded,
+    never-overwrite helper."""
+    import io
+    import zipfile
+
+    root = _guard_local_path(Path(folder), write=False)
+    if root.exists() and (not root.is_dir() or any(root.iterdir())):
+        raise ValueError(f"'{folder}' already exists and isn't an empty folder. Choose a new folder.")
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(content))
+    except zipfile.BadZipFile as exc:
+        raise APIError("The download wasn't a readable zip file.") from exc
+    members = [m for m in zf.infolist() if not m.is_dir()]
+    if len(members) > _BUNDLE_MAX_FILES or sum(m.file_size for m in members) > _BUNDLE_MAX_BYTES:
+        raise APIError("The zip is larger than a training bundle can be.")
+    for m in members:
+        parts = m.filename.split("/")
+        if m.filename.startswith("/") or "\\" in m.filename or ":" in m.filename \
+                or any(p in ("", ".", "..") for p in parts):
+            raise APIError(f"The zip has an unsafe path: {m.filename!r}")
+    for m in members:
+        _save_bytes(str(root / m.filename), zf.read(m))
+    return f"Unpacked {len(members)} files into: {root}"
+
+
+def _manage_page(training_id: str) -> str:
+    return f"{BASE_URL}/trainings/{training_id}/manage/"
 
 
 @_tool('Create Training')
@@ -3234,7 +3332,8 @@ def create_training(title: str, scope: str = "tenant", project_id: str = "", ide
                     description: str = "", category: str = "", training_type: str = "game",
                     slug: str = "") -> str:
     """Create a Training (a playable game or presentation shown inside QC Database).
-    You become its single owner, the only person who can upload versions.
+    You become its single owner, the only person who can upload versions until
+    one passes the security review.
 
     scope='tenant' (company-wide; CSAs) or 'project' with project_id (Project Admins).
     Pass idea_brief (markdown: topic, objectives, audience, concept, must-cover
@@ -3242,7 +3341,8 @@ def create_training(title: str, scope: str = "tenant", project_id: str = "", ide
     training_type is 'game' or 'presentation'. slug (optional) becomes the
     training's address https://<slug>.redline.school; one is generated otherwise.
     Next: attach the policy PDF with 'upload_training_policy', read
-    'get_training_authoring_guide', then build and test locally."""
+    'get_training_authoring_guide', start from 'get_training_template', then
+    upload a free private version with 'upload_training_version'."""
     params = _training_scope_params(scope, project_id)
     body = {k: v for k, v in {
         "title": title, "scope": params["scope"] or "tenant", "project_id": params["project_id"],
@@ -3257,9 +3357,9 @@ def create_training(title: str, scope: str = "tenant", project_id: str = "", ide
 @_trainings
 def list_trainings(scope: str = "", project_id: str = "", status: str = "", owned_by_me: bool = False) -> str:
     """List Trainings you can see: status (idea, draft, published, delisted,
-    archived), owner, versions and the current policy revision. Filter by
-    scope ('tenant' or 'project' + project_id), status, or owned_by_me=True for
-    the ones you can upload to."""
+    archived), owner, versions and the current policy revision. A training with
+    no reviewed version is listed only for its owner and uploaders. Filter by
+    scope ('tenant' or 'project' + project_id), status, or owned_by_me=True."""
     params = _training_scope_params(scope, project_id)
     payload = client().get("/api/trainings/", status=status or None,
                            owned_by_me="true" if owned_by_me else None, **params)
@@ -3271,8 +3371,9 @@ def list_trainings(scope: str = "", project_id: str = "", status: str = "", owne
 @_safe
 @_trainings
 def get_training(training_id: str) -> str:
-    """Get one Training: status, owner, slug and address, versions with their
-    review status, and the policy PDF revision."""
+    """Get one Training: status, owner, slug and address, the versions you can
+    see with their review status (your own private versions included, with
+    can_play / can_submit), and the policy PDF revision."""
     return _pretty(client().get(f"/api/trainings/{training_id}/"))
 
 
@@ -3280,8 +3381,8 @@ def get_training(training_id: str) -> str:
 @_safe
 @_trainings
 def list_training_ideas() -> str:
-    """List Training idea rows (a name and a brief) whose brief you may read: your
-    own as a Training Author, your projects' as a Project Admin, all as a CSA."""
+    """List Training idea rows (a name and a brief) you may read: the ones you
+    created and the ones assigned to you."""
     payload = client().get("/api/trainings/ideas/")
     items = payload.get("results", []) if isinstance(payload, dict) else payload
     return _render_list("Training ideas:", items or [], "No training ideas found.")
@@ -3349,8 +3450,9 @@ def upload_training_policy(training_id: str, file_path: str = "", remove: bool =
 def get_training_authoring_guide(part: str = "quickstart") -> str:
     """Read the spec for building a Training, in parts so you load only what you
     need: quickstart, design, mobile, multiplayer, limits, review, publish. Start
-    with quickstart. Build and test locally with `npx @redline/dev` (serve, check,
-    new); local testing is free, each upload costs $25."""
+    with quickstart. There is nothing to install: start from
+    'get_training_template', upload a free private version and play it on a phone;
+    only submitting it for review costs $25."""
     payload = client().get("/api/trainings/authoring-guide/", part=part or "quickstart")
     if isinstance(payload, dict) and isinstance(payload.get("markdown"), str):
         others = ", ".join(p for p in payload.get("parts") or [] if p != payload.get("part"))
@@ -3362,15 +3464,73 @@ def get_training_authoring_guide(part: str = "quickstart") -> str:
     return _pretty(payload)
 
 
+@_tool('Get Training Template')
+@_safe
+@_trainings
+def get_training_template(name: str = "", folder: str = "") -> Any:
+    """Get a starting template for a Training bundle, with marked GAME regions to
+    fill in. Without 'name' this lists the templates (solo-2d, presentation).
+    Start new trainings from a template, not a blank file.
+
+    On the local server pass 'folder' (a new or empty folder) and the template is
+    unpacked there; otherwise the zip is saved as '<name>.zip'. On the hosted
+    server the zip is returned inline, and its public URL is shown for anyone
+    who can download it themselves."""
+    payload = client().get("/api/trainings/templates/")
+    templates = payload.get("templates", []) if isinstance(payload, dict) else []
+    if not name:
+        lines = ["Training templates:"] + [f"  - {t.get('name')}: {t.get('url')}" for t in templates]
+        lines.append("Call again with name (and, on the local server, folder) to get one.")
+        return "\n".join(lines)
+    entry = next((t for t in templates if t.get("name") == name), None)
+    if entry is None:
+        raise ValueError(f"No template named '{name}'. Templates: "
+                         + ", ".join(str(t.get("name")) for t in templates))
+    with _redline_http() as http:
+        res = http.get(_redline_url(entry.get("url", "")))
+    if res.status_code != 200:
+        raise APIError(f"Couldn't download the template ({res.status_code}).")
+    if folder:
+        if hosted.hosted_enabled():
+            raise ValueError("The hosted server can't write to your disk: leave 'folder' out to get the zip.")
+        return _unpack_to_folder(res.content, folder)
+    delivered = _deliver_download(res.content, f"{name}.zip")
+    note = f"Template '{name}' (public URL: {entry.get('url')})."
+    if isinstance(delivered, list):
+        return [TextContent(type="text", text=note), *delivered]
+    return f"{note}\n{delivered}"
+
+
+@_tool('Download Training Version')
+@_safe
+@_trainings
+def download_training_version(training_id: str, version_id: str, folder: str = "") -> Any:
+    """Download every file of a version that PASSED the security review, as a zip:
+    how a co-developer starts a change. Never start from someone else's
+    unreviewed files (they can't be downloaded). Allowed for anyone who may
+    upload to the training: the owner, plus CSAs and Project Admins once it has
+    a reviewed version.
+
+    On the local server pass 'folder' (a new or empty folder) and the bundle is
+    unpacked there; otherwise the zip is saved under its own name. On the hosted
+    server the zip is returned inline."""
+    env = _download_b64(f"/api/trainings/{training_id}/versions/{version_id}/bundle/")
+    if folder:
+        if hosted.hosted_enabled():
+            raise ValueError("The hosted server can't write to your disk: leave 'folder' out to get the zip.")
+        return _unpack_to_folder(env["content"], folder)
+    return _deliver_download(env["content"], env["filename"] or f"training-{version_id}.zip")
+
+
 @_tool('Validate Training Bundle', read_only=True)
 @_safe
 @_trainings
 def validate_training_bundle(training_id: str, folder_path: str = "", files: str = "",
                              redline_json: str = "") -> str:
-    """FREE check of a training bundle's file list and redline.json against the
-    upload limits and manifest rules. Sends paths, sizes and hashes - never file
-    contents. Content checks and the phone smoke test run locally with
-    `npx @redline/dev check`; run that too before uploading.
+    """FREE quick check of a training bundle's file list and redline.json against
+    the upload limits and manifest rules. Sends paths, sizes and hashes - never
+    file contents. The full pre-checks (the content scan) run when you upload a
+    private version with 'upload_training_version', which is also free.
 
     On the local server pass folder_path and the manifest is computed for you.
     Otherwise pass files as a JSON array of {path, size, sha256} and, ideally,
@@ -3401,36 +3561,122 @@ def validate_training_bundle(training_id: str, folder_path: str = "", files: str
     return "\n".join(lines)
 
 
+def _finding_lines(items: Any, mark: str) -> list[str]:
+    return [f"  {mark} {e.get('code')} {e.get('path', '')}"
+            f"{':' + str(e.get('line')) if e.get('line') else ''}: {e.get('message')}"
+            for e in items or [] if isinstance(e, dict)]
+
+
+def _wait_for_stored(training_id: str, upload_id: str) -> dict[str, Any]:
+    """QC Database learns of a stored upload by webhook, usually within seconds."""
+    import time
+
+    status: dict[str, Any] = {}
+    for delay in (1, 2, 3, 4):
+        time.sleep(delay)
+        got = client().get(f"/api/trainings/{training_id}/uploads/{upload_id}/")
+        status = got if isinstance(got, dict) else {}
+        if status.get("version_id") or status.get("status") not in (None, "receiving"):
+            break
+    return status
+
+
 @_tool('Upload Training Version')
 @_safe
 @_trainings
-def upload_training_version(training_id: str, confirm_charge: bool = False, change_notes: str = "",
-                            upload_id: str = "") -> str:
-    """OWNER ONLY. BILLED: each uploaded version costs $25 of AI credits for its
-    security review. Without confirm_charge=True this only shows the price and
-    changes nothing - tell the user the cost and confirm the bundle passed
-    `npx @redline/dev check` and was played on a real phone before confirming.
+def upload_training_version(training_id: str, folder_path: str = "", change_notes: str = "",
+                            upload_id: str = "") -> Any:
+    """FREE. Upload a training bundle as a PRIVATE version: the free pre-checks run
+    and, if they pass, only you can play it (in QC Database, on a phone too).
+    Nothing is recorded and nobody else can see it until you submit it with
+    'submit_training_review' ($25). At most 20 uploads per training per day; you
+    keep your 5 newest private versions, and unsubmitted ones expire after 14 days.
+    The owner can upload; CSAs and Project Admins too once the training has a
+    reviewed version.
 
-    With confirm_charge=True it returns a one-time signed URL (about 15 minutes)
-    and the exact command to run: `npx @redline/dev upload <folder> --url <url>`.
-    NEVER paste file contents into any tool; the command streams them from disk.
-    Pass upload_id to get a fresh URL for an upload that hasn't finished. Then
-    poll 'get_training_review' with the upload_id."""
-    body: dict[str, Any] = {"confirm_charge": bool(confirm_charge)}
+    NEVER paste file contents into any tool. Instead:
+    - Local server: pass folder_path (the bundle folder). The server zips it and
+      uploads it straight to redline.school.
+    - Hosted server: zip the bundle folder, send the zip with 'begin_upload', and
+      pass the handle as folder_path.
+    - Without folder_path: returns a one-time signed zip_url (about 15 minutes)
+      and the command to upload a zip from a shell. Pass upload_id to get fresh
+      URLs for an upload that hasn't finished."""
+    body: dict[str, Any] = {}
     if change_notes:
         body["change_notes"] = change_notes
     if upload_id:
         body["upload_id"] = upload_id
+
+    data: Optional[bytes] = None
+    if folder_path:
+        if hosted.hosted_enabled():
+            _name, data = _read_hosted_upload(folder_path)
+            if not data.startswith(b"PK\x03\x04"):
+                raise ValueError("On the hosted server, folder_path must be the begin_upload handle of a "
+                                 ".zip of the bundle folder.")
+        else:
+            data = _zip_bundle(_bundle_files(folder_path))
+        if len(data) > _BUNDLE_MAX_BYTES:
+            raise ValueError("The zipped bundle is over 25 MB; a bundle may be at most 25 MB.")
+
     result = client().post(f"/api/trainings/{training_id}/versions/upload-url/", json=body)
-    if isinstance(result, dict) and result.get("confirm_charge_required"):
-        return (f"Not uploaded yet. {result.get('message', '')}\n\n"
-                f"Price: ${result.get('charge_usd')} {result.get('currency', 'USD')}.")
-    if isinstance(result, dict) and result.get("url"):
-        command = (result.get("command") or "").replace("<folder>", "<your bundle folder>")
+    if not isinstance(result, dict) or not result.get("zip_url"):
+        return _pretty(result)
+    uid = result.get("upload_id")
+
+    if data is None:
         return (f"Upload URL issued (expires {result.get('expires_at')}).\n"
+                f"upload_id: {uid}\nzip_url: {result.get('zip_url')}\n\n"
+                "Zip the bundle folder and upload the zip from the user's machine, e.g. in PowerShell:\n"
+                "  Compress-Archive -Path <bundle folder>\\* -DestinationPath bundle.zip -Force\n"
+                f"  curl.exe --fail -X PUT --upload-file bundle.zip \"{result.get('zip_url')}\"\n"
+                f"Or upload it on the training page: {_manage_page(training_id)}\n\n"
+                "Then call 'get_training_review' with this training_id and upload_id.")
+
+    outcome = _put_bundle_zip(result["zip_url"], data)
+    if outcome.get("status") == "rejected":
+        lines = ["Upload REJECTED by the free pre-checks (no charge). Fix these and upload again:"]
+        lines += _finding_lines(outcome.get("errors"), "x") + _finding_lines(outcome.get("warnings"), "!")
+        lines.append(f"upload_id: {uid}")
+        return "\n".join(lines)
+
+    status = _wait_for_stored(training_id, uid)
+    lines = ["Stored as a PRIVATE version: only you can play it, and nothing is recorded."]
+    lines += _finding_lines(outcome.get("warnings"), "!")
+    lines += [f"upload_id: {uid}",
+              f"version_id: {status.get('version_id') or '(not in QC Database yet; check get_training_review)'}",
+              f"redline_version_id: {outcome.get('version_id')}",
+              "",
+              f"Next: play it on a phone and a desktop from the training page: {_manage_page(training_id)}",
+              "When it plays well, submit it for the $25 security review with 'submit_training_review'."]
+    return "\n".join(lines)
+
+
+@_tool('Submit Training Review')
+@_safe
+@_trainings
+def submit_training_review(training_id: str, version_id: str, confirm_charge: bool = False) -> str:
+    """UPLOADER ONLY. BILLED: submits one of your private versions for the AI
+    security review, $25 of AI credits, charged when the review finishes (even if
+    it fails). Without confirm_charge=True this only shows the price and checks
+    and changes nothing - tell the user the cost and confirm they played this
+    exact version on a real phone before confirming.
+
+    The review runs on exactly the files that were played. If it passes, the
+    version becomes a draft the owner and admins can see; an admin publishes it
+    in QC Database. version_id is the QC Database or redline version id. Then
+    poll 'get_training_review' with the returned upload_id."""
+    result = client().post(f"/api/trainings/{training_id}/versions/{version_id}/submit-review/",
+                           json={"confirm_charge": bool(confirm_charge)})
+    if isinstance(result, dict) and result.get("confirm_charge_required"):
+        return (f"Not submitted yet. {result.get('message', '')}\n\n"
+                f"Price: ${result.get('charge_usd')} {result.get('currency', 'USD')}.")
+    if isinstance(result, dict) and result.get("upload_id"):
+        return (f"Submitted for review (${result.get('charge_usd')}).\n"
                 f"upload_id: {result.get('upload_id')}\n\n"
-                f"Run this from the user's machine (it streams the files from disk):\n  {command}\n\n"
-                "Then poll 'get_training_review' with this training_id and upload_id.")
+                "The review usually takes a few minutes. Poll 'get_training_review' with this "
+                "training_id and upload_id.")
     return _pretty(result)
 
 
@@ -3439,13 +3685,15 @@ def upload_training_version(training_id: str, confirm_charge: bool = False, chan
 @_trainings
 def get_training_review(training_id: str, upload_id: str = "", version_id: str = "") -> str:
     """Check an upload and its security review. Pass the upload_id from
-    'upload_training_version' (statuses: receiving, rejected - free pre-checks
-    failed, no charge -, reviewing, reviewed). Once reviewed, the full report is
-    included: per-file AI findings, bundle findings and the pre-check warnings.
-    Or pass version_id for an existing version. A passed/warned version becomes a
-    draft; an admin previews and publishes it in QC Database."""
+    'upload_training_version' or 'submit_training_review'. Statuses: receiving
+    (not uploaded yet), rejected (free pre-checks failed, no charge), stored (a
+    private version only you can play; submit it to share it), reviewing, and
+    reviewed. Once reviewed, the full report is included: per-file AI findings,
+    bundle findings and the pre-check warnings. Or pass version_id for an
+    existing version. A passed/warned version becomes a draft; an admin previews
+    and publishes it in QC Database."""
     if not upload_id and not version_id:
-        raise ValueError("Pass upload_id (from upload_training_version) or version_id.")
+        raise ValueError("Pass upload_id (from upload_training_version or submit_training_review) or version_id.")
     parts: list[str] = []
     if upload_id:
         status = client().get(f"/api/trainings/{training_id}/uploads/{upload_id}/")
@@ -3454,6 +3702,9 @@ def get_training_review(training_id: str, upload_id: str = "", version_id: str =
             version_id = version_id or status.get("version_id") or ""
             if status.get("status") in ("receiving", "reviewing"):
                 parts.append("Not finished yet - check again in a minute or two.")
+            elif status.get("status") == "stored":
+                parts.append(f"Private version: play it from {_manage_page(training_id)}, then "
+                             "'submit_training_review' to share it.")
     if version_id:
         parts.append(_pretty(client().get(f"/api/trainings/{training_id}/versions/{version_id}/review/")))
     return "\n\n".join(parts)

@@ -1,8 +1,13 @@
 """Trainings tools: thin wrappers over /api/trainings/ (one endpoint per tool),
-the confirm_charge preview, idempotent policy uploads, error-code passthrough
+free private uploads (zipped on the user's machine, sent only to
+redline.school), the submit-review confirm_charge preview, templates and
+reviewed-version downloads, idempotent policy uploads, error-code passthrough
 and the re-consent message for connections without the trainings scope."""
+import base64
 import hashlib
+import io
 import json
+import zipfile
 
 import httpx
 import pytest
@@ -61,27 +66,176 @@ def test_project_scope_needs_project_id(calls):
     assert calls == []
 
 
-def test_upload_version_without_confirmation_only_previews(calls):
-    path = "/api/trainings/t1/versions/upload-url/"
-    calls.responses[("POST", path)] = (200, {"confirm_charge_required": True, "charge_usd": "25.00", "currency": "USD", "message": "Test locally first."})
+ZIP_URL = "https://ingest.redline.school/v1/uploads/u1/bundle.zip?token=x"
+
+
+@pytest.fixture
+def redline(monkeypatch):
+    """Requests sent to redline.school, plus the canned responses by (method, host+path)."""
+    seen = _Calls()
+
+    def handler(request: httpx.Request):
+        request.read()
+        seen.append(request)
+        status, body = seen.responses.get((request.method, request.url.host + request.url.path), (200, {}))
+        if isinstance(body, bytes):
+            return httpx.Response(status, content=body)
+        return httpx.Response(status, json=body)
+
+    monkeypatch.setattr(server, "_redline_http", lambda: httpx.Client(transport=httpx.MockTransport(handler)))
+    monkeypatch.setattr(server.hosted, "hosted_enabled", lambda: False)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    return seen
+
+
+def _zip(files):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name, content in files.items():
+            zf.writestr(name, content)
+    return buf.getvalue()
+
+
+def _bundle(tmp_path):
+    (tmp_path / "index.html").write_text("<!doctype html>")
+    (tmp_path / "redline.json").write_text('{"spec": "0.3"}')
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "HEAD").write_text("ref")
+    (tmp_path / ".DS_Store").write_text("x")
+    (tmp_path / "node_modules").mkdir()
+    (tmp_path / "node_modules" / "x.js").write_text("ignored")
+    return tmp_path
+
+
+def _issue_url(calls):
+    calls.responses[("POST", "/api/trainings/t1/versions/upload-url/")] = (201, {
+        "upload_id": "u1", "url": "https://ingest.redline.school/v1/uploads/u1?token=x",
+        "zip_url": ZIP_URL, "expires_at": "soon", "charge_usd": "0.00"})
+
+
+def test_upload_folder_zips_locally_and_puts_only_to_redline(calls, redline, tmp_path):
+    _issue_url(calls)
+    calls.responses[("GET", "/api/trainings/t1/uploads/u1/")] = (200, {"status": "stored", "version_id": "v9"})
+    redline.responses[("PUT", "ingest.redline.school/v1/uploads/u1/bundle.zip")] = (
+        201, {"status": "stored", "review_status": "private", "version_id": "abc123", "warnings": []})
+    out = server.upload_training_version("t1", folder_path=str(_bundle(tmp_path)), change_notes="v2")
+
+    assert json.loads(calls[0].content) == {"change_notes": "v2"}  # free: no confirm_charge
+    put = redline[0]
+    assert put.method == "PUT" and str(put.url) == ZIP_URL
+    assert "authorization" not in put.headers  # the QC Database token never goes to redline.school
+    names = zipfile.ZipFile(io.BytesIO(put.content)).namelist()
+    assert sorted(names) == ["index.html", "redline.json"]  # no dot-files, no node_modules
+    assert all(b"<!doctype" not in c.content for c in calls)  # contents never reach QC Database
+    assert "PRIVATE version" in out and "v9" in out and "submit_training_review" in out
+    assert "/trainings/t1/manage/" in out
+
+
+def test_upload_rejected_by_prechecks_lists_the_errors(calls, redline, tmp_path):
+    _issue_url(calls)
+    redline.responses[("PUT", "ingest.redline.school/v1/uploads/u1/bundle.zip")] = (422, {
+        "status": "rejected", "charged": False,
+        "errors": [{"code": "eval", "path": "game.js", "line": 12, "message": "eval is not allowed"}],
+        "warnings": []})
+    out = server.upload_training_version("t1", folder_path=str(_bundle(tmp_path)))
+    assert "REJECTED" in out and "no charge" in out and "game.js:12" in out
+
+
+def test_upload_refuses_a_non_redline_url(calls, redline, tmp_path):
+    calls.responses[("POST", "/api/trainings/t1/versions/upload-url/")] = (201, {
+        "upload_id": "u1", "zip_url": "https://evil.example/upload"})
+    out = server.upload_training_version("t1", folder_path=str(_bundle(tmp_path)))
+    assert out.startswith("Error:") and "redline.school" in out
+    assert redline == []
+
+
+def test_upload_without_folder_returns_the_zip_command(calls, redline):
+    _issue_url(calls)
     out = server.upload_training_version("t1")
+    assert ZIP_URL in out and "Compress-Archive" in out and "curl.exe" in out
+    assert "npx" not in out and redline == []
+
+
+def test_hosted_upload_forwards_a_begin_upload_zip(calls, redline, monkeypatch):
+    monkeypatch.setattr(server.hosted, "hosted_enabled", lambda: True)
+    data = _zip({"index.html": "<!doctype html>"})
+    monkeypatch.setattr(server, "_read_hosted_upload", lambda handle: ("bundle.zip", data))
+    _issue_url(calls)
+    redline.responses[("PUT", "ingest.redline.school/v1/uploads/u1/bundle.zip")] = (
+        201, {"status": "stored", "version_id": "abc123"})
+    out = server.upload_training_version("t1", folder_path="handle-1")
+    assert redline[0].content == data and "PRIVATE version" in out
+
+
+def test_hosted_upload_needs_a_zip(calls, redline, monkeypatch):
+    monkeypatch.setattr(server.hosted, "hosted_enabled", lambda: True)
+    monkeypatch.setattr(server, "_read_hosted_upload", lambda handle: ("x.html", b"<!doctype html>"))
+    out = server.upload_training_version("t1", folder_path="handle-1")
+    assert out.startswith("Error:") and calls == [] and redline == []
+
+
+def test_submit_without_confirmation_only_previews(calls):
+    path = "/api/trainings/t1/versions/v1/submit-review/"
+    calls.responses[("POST", path)] = (200, {"confirm_charge_required": True, "charge_usd": "25.00",
+                                             "currency": "USD", "message": "Play it on a phone first."})
+    out = server.submit_training_review("t1", "v1")
     assert json.loads(calls[0].content) == {"confirm_charge": False}
-    assert "Not uploaded yet" in out and "$25.00" in out
+    assert "Not submitted yet" in out and "$25.00" in out
 
 
-def test_upload_version_with_confirmation_returns_the_command(calls):
-    path = "/api/trainings/t1/versions/upload-url/"
-    calls.responses[("POST", path)] = (201, {"upload_id": "u1", "url": "https://ingest.redline.school/v1/uploads/u1?token=x",
-                                             "expires_at": "soon", "command": 'npx @redline/dev upload <folder> --url "https://ingest…"'})
-    out = server.upload_training_version("t1", confirm_charge=True, change_notes="v2")
-    assert json.loads(calls[0].content) == {"confirm_charge": True, "change_notes": "v2"}
-    assert "npx @redline/dev upload <your bundle folder>" in out and "u1" in out
+def test_submit_with_confirmation(calls):
+    path = "/api/trainings/t1/versions/v1/submit-review/"
+    calls.responses[("POST", path)] = (202, {"upload_id": "u1", "charge_usd": "25.00", "version": {}})
+    out = server.submit_training_review("t1", "v1", confirm_charge=True)
+    assert json.loads(calls[0].content) == {"confirm_charge": True}
+    assert "Submitted" in out and "u1" in out
 
 
 def test_error_codes_pass_through(calls):
-    calls.responses[("POST", "/api/trainings/t1/versions/upload-url/")] = (402, {"detail": "AI credits are too low.", "code": "insufficient_ai_credits"})
-    out = server.upload_training_version("t1", confirm_charge=True)
+    calls.responses[("POST", "/api/trainings/t1/versions/v1/submit-review/")] = (
+        402, {"detail": "AI credits are too low.", "code": "insufficient_ai_credits"})
+    out = server.submit_training_review("t1", "v1", confirm_charge=True)
     assert "insufficient_ai_credits" in out
+
+
+def test_template_lists_then_unpacks_into_a_new_folder(calls, redline, tmp_path):
+    url = "https://redline.school/templates/solo-2d.zip"
+    calls.responses[("GET", "/api/trainings/templates/")] = (200, {"templates": [{"name": "solo-2d", "url": url}]})
+    assert "solo-2d" in server.get_training_template()
+    redline.responses[("GET", "redline.school/templates/solo-2d.zip")] = (
+        200, _zip({"index.html": "<!doctype html>", "js/game.js": "// GAME"}))
+    out = server.get_training_template("solo-2d", folder=str(tmp_path / "new"))
+    assert "Unpacked 2 files" in out
+    assert (tmp_path / "new" / "js" / "game.js").read_text() == "// GAME"
+    assert "authorization" not in redline[0].headers
+
+
+def test_unpack_refuses_unsafe_paths_and_non_empty_folders(calls, redline, tmp_path):
+    url = "https://redline.school/templates/solo-2d.zip"
+    calls.responses[("GET", "/api/trainings/templates/")] = (200, {"templates": [{"name": "solo-2d", "url": url}]})
+    redline.responses[("GET", "redline.school/templates/solo-2d.zip")] = (200, _zip({"../evil.js": "x"}))
+    out = server.get_training_template("solo-2d", folder=str(tmp_path / "a"))
+    assert "unsafe path" in out and not (tmp_path / "evil.js").exists()
+    (tmp_path / "b").mkdir()
+    (tmp_path / "b" / "keep.txt").write_text("mine")
+    redline.responses[("GET", "redline.school/templates/solo-2d.zip")] = (200, _zip({"keep.txt": "x"}))
+    out = server.get_training_template("solo-2d", folder=str(tmp_path / "b"))
+    assert "isn't an empty folder" in out and (tmp_path / "b" / "keep.txt").read_text() == "mine"
+
+
+def test_download_version_unpacks_the_reviewed_bundle(calls, redline, tmp_path):
+    data = _zip({"index.html": "<!doctype html>", "quiz.json": "{}"})
+    calls.responses[("GET", "/api/trainings/t1/versions/v1/bundle/")] = (200, {
+        "success": True, "encoding": "base64", "filename": "trench-abc.zip",
+        "data": base64.b64encode(data).decode()})
+    out = server.download_training_version("t1", "v1", folder=str(tmp_path / "work"))
+    assert "Unpacked 2 files" in out and (tmp_path / "work" / "quiz.json").exists()
+
+
+def test_download_version_refuses_unreviewed(calls, redline):
+    calls.responses[("GET", "/api/trainings/t1/versions/v1/bundle/")] = (
+        409, {"detail": "Only a version that passed the security review can be downloaded.", "code": "not_reviewed"})
+    assert "not_reviewed" in server.download_training_version("t1", "v1")
 
 
 def test_missing_scope_explains_reconsent(calls):
@@ -114,6 +268,7 @@ def test_validate_computes_the_manifest_locally_without_contents(calls, tmp_path
     (tmp_path / "redline.json").write_text('{"spec": "0.2"}')
     (tmp_path / "node_modules").mkdir()
     (tmp_path / "node_modules" / "x.js").write_text("ignored")
+    (tmp_path / ".DS_Store").write_text("ignored")
     calls.responses[("POST", "/api/trainings/t1/validate/")] = (200, {"ok": False, "errors": [{"code": "missing_file", "path": "DESIGN.md", "message": "required"}], "warnings": [], "stats": {"files": 2}})
     out = server.validate_training_bundle("t1", folder_path=str(tmp_path))
     body = json.loads(calls[0].content)

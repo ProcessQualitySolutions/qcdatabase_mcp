@@ -244,9 +244,14 @@ Then ask Claude to **"connect to QC Database"** to sign in — see below.
 - **Trainings (playable trainings on redline.school):** `create_training`,
   `list_trainings`, `get_training`, `list_training_ideas`, `get_training_idea`,
   `get_training_policy` (admins), `upload_training_policy`,
-  `get_training_authoring_guide`, `validate_training_bundle` (free),
-  `upload_training_version` (owner only, $25 per version; returns a signed URL for
-  `npx @redline/dev upload`, never file contents), `get_training_review`. These
+  `get_training_authoring_guide`, `get_training_template`,
+  `validate_training_bundle` (free), `upload_training_version` (free; stores a
+  private version only you can play), `submit_training_review` ($25 security
+  review, needs `confirm_charge`), `get_training_review` and
+  `download_training_version` (reviewed versions only, for co-developers). The
+  local server zips a bundle folder itself and sends it straight to
+  redline.school; on the hosted server, send a zip with `begin_upload` first.
+  File contents never pass through the AI. These tools
   take an explicit `scope` rather than the active project. Connections approved
   before Trainings existed must re-approve to get `trainings:read`/`trainings:write`.
   Publishing, delisting and reassigning owners stay in the QC Database web app.
