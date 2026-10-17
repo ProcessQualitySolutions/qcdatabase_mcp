@@ -119,6 +119,7 @@ photos:read photos:write
 linespecs:read linespecs:write
 lists:read
 shippers:read
+trainings:read trainings:write
 manual:read
 ```
 

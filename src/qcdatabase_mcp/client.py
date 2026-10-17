@@ -136,8 +136,11 @@ class QCClient:
         data: dict[str, Any] | None = None,
         files: Any | None = None,
         timeout: float | None = None,
+        headers: dict[str, str] | None = None,
     ) -> Any:
         """Make one authenticated request and return parsed JSON (or None).
+
+        ``headers`` adds request headers (e.g. ``Idempotency-Key``) on top of auth.
 
         ``timeout`` overrides the client default for this call - for endpoints
         that do a lot of work in one round trip (the zipmap ingest builds a
@@ -155,7 +158,7 @@ class QCClient:
                 json=json,
                 data=data,
                 files=files,
-                headers=self._headers(),
+                headers={**(headers or {}), **self._headers()},
                 **extra,
             )
 
@@ -222,7 +225,11 @@ class QCClient:
         if isinstance(body, dict):
             for key in ("detail", "error_description", "error", "message"):
                 if key in body:
-                    return str(body[key]) + QCClient._itemized(body)
+                    # A stable machine code (e.g. training_required, owner_only,
+                    # insufficient_ai_credits) tells the assistant what to do next.
+                    code = body.get("code")
+                    tag = f" [code: {code}]" if isinstance(code, str) and code and code != body[key] else ""
+                    return str(body[key]) + tag + QCClient._itemized(body)
             return "; ".join(f"{k}: {v}" for k, v in body.items())[:400]
         return str(body)[:300]
 
@@ -294,10 +301,11 @@ class QCClient:
         path: str,
         files: list[tuple[str, tuple[str, BinaryIO, str]]],
         data: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> Any:
         """POST a multipart/form-data body (file uploads)."""
         clean = {k: v for k, v in (data or {}).items() if v is not None}
-        return self.request("POST", path, files=files, data=clean or None)
+        return self.request("POST", path, files=files, data=clean or None, headers=headers)
 
     # ----- pagination ----------------------------------------------------
     def get_all(self, path: str, **params: Any) -> list[Any]:
