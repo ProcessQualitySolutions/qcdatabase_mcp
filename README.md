@@ -241,6 +241,15 @@ Then ask Claude to **"connect to QC Database"** to sign in — see below.
   packages, list items, map items, form submissions, notes, and shippers
 - **How QC Database works:** `search_user_manual` (ask "how do I…?" questions and
   read the product help articles), `list_user_manual` (browse the help contents)
+- **Trainings (playable trainings on redline.school):** `create_training`,
+  `list_trainings`, `get_training`, `list_training_ideas`, `get_training_idea`,
+  `get_training_policy` (admins), `upload_training_policy`,
+  `get_training_authoring_guide`, `validate_training_bundle` (free),
+  `upload_training_version` (owner only, $25 per version; returns a signed URL for
+  `npx @redline/dev upload`, never file contents), `get_training_review`. These
+  take an explicit `scope` rather than the active project. Connections approved
+  before Trainings existed must re-approve to get `trainings:read`/`trainings:write`.
+  Publishing, delisting and reassigning owners stay in the QC Database web app.
 - **Utilities:** `generate_qr_code`
 
 ---

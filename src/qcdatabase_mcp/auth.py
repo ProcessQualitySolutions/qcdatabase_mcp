@@ -50,6 +50,7 @@ DEFAULT_SCOPES = (
     "locks:read locks:write "
     "lists:read "
     "shippers:read "
+    "trainings:read trainings:write "
     "manual:read"
 )
 
