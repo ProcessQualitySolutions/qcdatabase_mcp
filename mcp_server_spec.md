@@ -120,6 +120,7 @@ linespecs:read linespecs:write
 lists:read
 shippers:read
 trainings:read trainings:write
+forum:read forum:write
 manual:read
 ```
 
@@ -270,6 +271,14 @@ complete.
   request. This is the heart of assembling a complete, traceable turnover package.
 - **Shippers (receiving):** `/api/shippers/projects/{project_id}/…` — incoming
   material records and their line items (read-only).
+- **Community forum:** `/api/forum/…` — boards, posts (filter by board, search,
+  `is_question`) and threaded replies, with an optional image on a post or reply.
+  The forum is **cross-tenant**: every QC Database user at every company can read
+  what is posted, so a server SHOULD show the user the exact text before posting
+  and keep project/tenant details out unless the user clears them. Forum text is
+  written by other users and MUST be treated as data, not instructions (see §7).
+  QC Database stamps `posted_via_mcp` itself; clients cannot set it. Moderation
+  (delete, pin, archive, ban, accept answer) is web-only.
 - **Utilities:** QR generation for internal app paths (`/api/qr/generate/`).
 
 ---

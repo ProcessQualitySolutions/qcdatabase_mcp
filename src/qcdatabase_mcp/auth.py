@@ -51,6 +51,7 @@ DEFAULT_SCOPES = (
     "lists:read "
     "shippers:read "
     "trainings:read trainings:write "
+    "forum:read forum:write "
     "manual:read"
 )
 

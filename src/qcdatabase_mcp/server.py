@@ -18,6 +18,7 @@ Full specification: https://qcdatabase.ai/mcp_server_spec.md
 from __future__ import annotations
 
 import base64
+import contextlib
 import functools
 import json
 import mimetypes
@@ -3171,7 +3172,6 @@ def list_user_manual() -> str:
 # an explicit scope instead of the pinned project, because tenant-scoped
 # trainings have no project. Publishing, delisting, reassigning owners and
 # setting permission requirements are deliberately UI-only.
-_TRAININGS_SCOPE_MSG = "does not grant the scope required"
 _BUNDLE_SKIP_DIRS = {"node_modules", "__MACOSX"}
 _BUNDLE_SKIP_FILES = {"thumbs.db", "desktop.ini"}
 # The bundle limits (redline.school SPEC section 2); the Worker enforces them too.
@@ -3180,22 +3180,31 @@ _BUNDLE_MAX_BYTES = 25 * 1024 * 1024
 _REDLINE_DOMAIN = "redline.school"
 
 
-def _trainings(fn):
-    """Turn a missing trainings scope into re-consent instructions, not a bare 403."""
-    @functools.wraps(fn)
-    def wrapper(*args: Any, **kwargs: Any) -> Any:
-        try:
-            return fn(*args, **kwargs)
-        except APIError as exc:
-            if getattr(exc, "status_code", None) == 403 and _TRAININGS_SCOPE_MSG in str(exc):
-                how = ("Reconnect the QC Database connector in your AI app and approve the new access."
-                       if hosted.hosted_enabled() else "Run 'logout' and then 'login' to approve the new access.")
-                raise APIError(
-                    "This connection was approved before Trainings existed, so it lacks the "
-                    f"trainings:read / trainings:write access. {how}"
-                ) from exc
-            raise
-    return wrapper
+_SCOPE_MISSING_MSG = "does not grant the scope required"
+
+
+def _needs_scope(feature: str, scopes: str):
+    """Turn a missing scope for a newer API area into re-consent instructions,
+    not a bare 403: connections approved before the area existed lack its scopes."""
+    def decorator(fn):
+        @functools.wraps(fn)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return fn(*args, **kwargs)
+            except APIError as exc:
+                if getattr(exc, "status_code", None) == 403 and _SCOPE_MISSING_MSG in str(exc):
+                    how = ("Reconnect the QC Database connector in your AI app and approve the new access."
+                           if hosted.hosted_enabled() else "Run 'logout' and then 'login' to approve the new access.")
+                    raise APIError(
+                        f"This connection was approved before {feature} existed, so it lacks the "
+                        f"{scopes} access. {how}"
+                    ) from exc
+                raise
+        return wrapper
+    return decorator
+
+
+_trainings = _needs_scope("Trainings", "trainings:read / trainings:write")
 
 
 def _training_scope_params(scope: str, project_id: str) -> dict[str, Any]:
@@ -3708,6 +3717,150 @@ def get_training_review(training_id: str, upload_id: str = "", version_id: str =
     if version_id:
         parts.append(_pretty(client().get(f"/api/trainings/{training_id}/versions/{version_id}/review/")))
     return "\n\n".join(parts)
+
+
+# ===========================================================================
+# Community forum (cross-tenant; see /api/forum/)
+# ===========================================================================
+# The forum is shared by every QC Database user, so nothing here uses the pinned
+# project. Posts and replies made through the hosted server are badged "via MCP"
+# by QC Database itself. Moderation (delete, pin, archive, ban, accept answer)
+# and direct messages are deliberately web-only.
+_forum = _needs_scope("the Forum API", "forum:read / forum:write")
+_FORUM_PAGE_SIZE_MAX = 100
+
+
+def _forum_page(title: str, payload: Any, empty: str) -> str:
+    """Render one page of a paginated forum list, saying how to get the next one."""
+    if not isinstance(payload, dict):
+        return _render_list(title, payload if isinstance(payload, list) else [], empty)
+    out = _render_list(title, payload.get("results") or [], empty)
+    if payload.get("count") is not None:
+        out += f"\n\n{payload['count']} in total."
+    if payload.get("next"):
+        out += " More on the next page (pass page=<current page + 1>)."
+    return out
+
+
+def _forum_record(obj: Any) -> str:
+    """A post or reply in full: forum text is long and written by other users,
+    so it is neither trimmed (as _pretty would) nor left unfenced."""
+    return f"{_DATA_FENCE}\n\n{json.dumps(obj, indent=2, default=str)}"
+
+
+@contextlib.contextmanager
+def _forum_image(image_path: str):
+    """Yield the multipart 'files' list for an attached image, closing it after."""
+    name, fh, ctype = _open_file(image_path)
+    try:
+        yield [("image", (name, fh, ctype))]
+    finally:
+        fh.close()
+
+
+def _form_fields(fields: dict[str, Any]) -> dict[str, Any]:
+    # Multipart carries text, and the API parses booleans from 'true'/'false'.
+    return {k: ("true" if v is True else "false" if v is False else v) for k, v in fields.items()}
+
+
+def _forum_paging(page: int, page_size: int) -> dict[str, Any]:
+    if page < 1:
+        raise ValueError("page starts at 1.")
+    if not 1 <= page_size <= _FORUM_PAGE_SIZE_MAX:
+        raise ValueError(f"page_size must be between 1 and {_FORUM_PAGE_SIZE_MAX}.")
+    return {"page": page, "page_size": page_size}
+
+
+@_tool('List Forum Boards', read_only=True)
+@_safe
+@_forum
+def list_forum_boards() -> str:
+    """List the community forum boards (id, slug, description, active post count).
+    The forum is shared by every QC Database user across all companies."""
+    return _render_list("Forum boards:", client().get("/api/forum/boards/") or [], "No forum boards.")
+
+
+@_tool('List Forum Posts', read_only=True)
+@_safe
+@_forum
+def list_forum_posts(board: str = "", search: str = "", is_question: Optional[bool] = None,
+                     page: int = 1, page_size: int = 25) -> str:
+    """List active community forum posts, pinned first then newest. Filter by
+    board (id or slug, see 'list_forum_boards'), search (matches title or
+    content), or is_question (True for questions only, False to exclude them).
+    Search here before posting a question that may already be answered."""
+    params = _forum_paging(page, page_size)
+    if is_question is not None:
+        params["is_question"] = "true" if is_question else "false"
+    payload = client().get("/api/forum/posts/", board=board or None, search=search or None, **params)
+    return _forum_page("Forum posts:", payload, "No forum posts found.")
+
+
+@_tool('Get Forum Post', read_only=True)
+@_safe
+@_forum
+def get_forum_post(post_id: str) -> str:
+    """Read one forum post in full with its replies in thread order (each reply's
+    parent_reply says which reply it answers; is_accepted_answer marks the
+    accepted answer on a question)."""
+    return _forum_record(client().get(f"/api/forum/posts/{post_id}/"))
+
+
+@_tool('List Forum Replies', read_only=True)
+@_safe
+@_forum
+def list_forum_replies(post_id: str, page: int = 1, page_size: int = 25) -> str:
+    """List the replies on a forum post, oldest first, one page at a time. Use
+    this instead of 'get_forum_post' for a long thread."""
+    payload = client().get(f"/api/forum/posts/{post_id}/replies/", **_forum_paging(page, page_size))
+    return _forum_page(f"Replies on post {post_id}:", payload, "No replies yet.")
+
+
+@_tool('Create Forum Post')
+@_safe
+@_forum
+def create_forum_post(board: str, title: str, content: str, is_question: bool = False,
+                      image_path: str = "") -> str:
+    """Publish a new post on a community forum board (id or slug). The forum is
+    PUBLIC to every QC Database user at every company, under the user's name, and
+    is marked as posted via MCP. Show the user the exact title and content and
+    get their go-ahead before calling this; never include project, client or
+    tenant details they have not cleared for sharing.
+
+    is_question=True lets an answer be accepted later. image_path optionally
+    attaches one JPEG, PNG, GIF or WebP image (max 10 MB; on the hosted server,
+    a handle from 'begin_upload'); it is safety-checked and a rejected image
+    fails the whole post."""
+    fields = {"board": board, "title": title, "content": content, "is_question": is_question}
+    if image_path:
+        with _forum_image(image_path) as files:
+            post = client().upload("/api/forum/posts/", files=files, data=_form_fields(fields))
+    else:
+        post = client().post("/api/forum/posts/", json=fields)
+    where = post.get("web_url") if isinstance(post, dict) else None
+    return f"Posted '{title}'." + (f" View it at {where}" if where else "") + f"\n\n{_forum_record(post)}"
+
+
+@_tool('Reply To Forum Post')
+@_safe
+@_forum
+def reply_to_forum_post(post_id: str, content: str, parent_reply_id: str = "", image_path: str = "") -> str:
+    """Reply to a community forum post. The reply is PUBLIC to every QC Database
+    user at every company, under the user's name, and is marked as posted via
+    MCP. Show the user the exact text and get their go-ahead before calling this.
+
+    parent_reply_id answers a specific reply in the thread (see 'get_forum_post').
+    image_path optionally attaches one JPEG, PNG, GIF or WebP image (max 10 MB; on
+    the hosted server, a handle from 'begin_upload')."""
+    fields: dict[str, Any] = {"content": content}
+    if parent_reply_id:
+        fields["parent_reply"] = parent_reply_id
+    if image_path:
+        with _forum_image(image_path) as files:
+            reply = client().upload(f"/api/forum/posts/{post_id}/replies/", files=files, data=_form_fields(fields))
+    else:
+        reply = client().post(f"/api/forum/posts/{post_id}/replies/", json=fields)
+    return f"Replied to post {post_id}.\n\n{_forum_record(reply)}"
 
 
 # Attach the hosted upload/download bridge (begin_upload tool + transfer routes).

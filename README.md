@@ -255,6 +255,13 @@ Then ask Claude to **"connect to QC Database"** to sign in — see below.
   take an explicit `scope` rather than the active project. Connections approved
   before Trainings existed must re-approve to get `trainings:read`/`trainings:write`.
   Publishing, delisting and reassigning owners stay in the QC Database web app.
+- **Community forum (shared by all QC Database users):** `list_forum_boards`,
+  `list_forum_posts` (filter by board, search, questions), `get_forum_post`,
+  `list_forum_replies`, `create_forum_post` and `reply_to_forum_post` (optional
+  image; on the hosted server, send it with `begin_upload` first). Posts are public
+  to every company and are badged "via MCP" by QC Database, so the assistant shows
+  you the text before posting. Connections approved before the Forum API existed
+  must re-approve to get `forum:read`/`forum:write`. Moderation stays in the web app.
 - **Utilities:** `generate_qr_code`
 
 ---
