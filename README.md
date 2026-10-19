@@ -532,6 +532,13 @@ Hosted-mode configuration (flags override env):
   `https://qcdatabase.ai`).
 - `QCDB_MCP_ALLOWED_HOSTS` / `QCDB_MCP_ALLOWED_ORIGINS` — extra allow-list entries
   (comma-separated), e.g. when fronted by additional hostnames.
+- `QCDB_MCP_SCOPES` — scopes advertised as `scopes_supported` in the
+  protected-resource document and as `scope="..."` in the 401 challenge
+  (space- or comma-separated). Defaults to the same everyday read + write set the
+  stdio login uses. MCP clients such as Claude only request advertised scopes, so
+  leaving this empty would give them read-only access. Advertised, not required:
+  a token approved with fewer scopes still connects. Every value must be a scope
+  QCDatabase.AI grants.
 - `QCDB_MCP_TOKEN_CACHE_TTL` — seconds a verified token is trusted before
   re-checking `/api/whoami/` (default `60`). This is also the window in which a
   token revoked upstream keeps working here; lower it to shrink that window.

@@ -126,6 +126,38 @@ def test_discovery_resource(auth_app):
     assert 'resource_metadata="https://mcp.example.test/.well-known/oauth-protected-resource/mcp"' in challenge.headers["www-authenticate"]
 
 
+def test_discovery_and_challenge_advertise_scopes(auth_app):
+    # Claude Code / Desktop only request advertised scopes; with none listed
+    # they fall back to the authorization server's read-only defaults.
+    from qcdatabase_mcp.auth import DEFAULT_SCOPES
+    client, _, _ = auth_app
+    expected = DEFAULT_SCOPES.split()
+    for path in ("/.well-known/oauth-protected-resource",
+                 "/.well-known/oauth-protected-resource/mcp"):
+        assert client.get(path).json()["scopes_supported"] == expected
+    assert "projects:write" in expected and "trainings:write" in expected
+    challenge = rpc(client, token=None).headers["www-authenticate"]
+    assert challenge.startswith("Bearer ")
+    assert f'scope="{DEFAULT_SCOPES}"' in challenge
+    assert challenge.count("scope=") == 1
+
+
+def test_advertised_scopes_are_not_required(auth_app):
+    # A token approved with read access only must still connect: the API
+    # enforces per-endpoint scopes, the resource server must not.
+    client, state, _ = auth_app
+    state["data"]["scopes"] = ["projects:read"]
+    assert rpc(client, token="read-only-token").status_code == 200
+
+
+def test_advertised_scopes_env_override(monkeypatch):
+    monkeypatch.setenv("QCDB_MCP_SCOPES", "projects:read, projects:write  bad\"x projects:read")
+    assert hosted.advertised_scopes() == ["projects:read", "projects:write"]
+    monkeypatch.setenv("QCDB_MCP_SCOPES", "  ")
+    from qcdatabase_mcp.auth import DEFAULT_SCOPES
+    assert hosted.advertised_scopes() == DEFAULT_SCOPES.split()
+
+
 def test_resource_identity_matches_endpoint_without_changing_base(monkeypatch):
     monkeypatch.setenv("QCDB_MCP_RESOURCE_URL", "https://mcp.example.test/")
     assert hosted.resource_url() == "https://mcp.example.test"

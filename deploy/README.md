@@ -62,7 +62,10 @@ curl -s https://mcp.qcdatabase.ai/health
 
 # OAuth discovery document MCP clients use to find the sign-in server:
 curl -s https://mcp.qcdatabase.ai/.well-known/oauth-protected-resource
-# -> {"resource":"https://mcp.qcdatabase.ai/","authorization_servers":["https://qcdatabase.ai/"],...}
+# -> {"resource":"https://mcp.qcdatabase.ai/mcp","authorization_servers":["https://qcdatabase.ai/"],
+#     "scopes_supported":["tenants:read","projects:read","projects:write",...],...}
+# scopes_supported must be present: Claude only requests advertised scopes and
+# otherwise ends up with read-only access.
 
 # The MCP endpoint must answer 401 (not 404/421/502) with a WWW-Authenticate header:
 curl -si -X POST https://mcp.qcdatabase.ai/mcp \
@@ -98,3 +101,4 @@ in-memory pins reset on restart, Redis-backed ones don't).
 | Client can't find the sign-in server | Discovery document unreachable | `curl /.well-known/oauth-protected-resource` through the proxy — it must return 200 |
 | **502** from the proxy | Server not running / wrong upstream port | `journalctl -u qcdatabase-mcp`; check `QCDB_MCP_PORT` matches the proxy config |
 | Reached under a second hostname → 421 | Host not in the allow-list | Add it to `QCDB_MCP_ALLOWED_HOSTS` |
+| Claude connects but can only read (writes fail with a scope error) | No `scopes_supported` advertised, so Claude asked for no scope | Check the discovery document lists the write scopes; override with `QCDB_MCP_SCOPES` if needed, then reconnect in Claude |
