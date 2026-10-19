@@ -42,6 +42,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import threading
 import time
 from urllib.parse import urlparse
@@ -153,6 +154,35 @@ def validate_config() -> list[str]:
             "MCP clients receive the correct OAuth resource identifier."
         )
     return errors
+
+
+_SCOPE_TOKEN = re.compile(r"^[A-Za-z0-9_.:-]+$")
+
+
+def advertised_scopes() -> list[str]:
+    """Scopes MCP clients should request, published as ``scopes_supported``.
+
+    Claude Code / Claude Desktop only request scopes the protected-resource
+    document advertises; with none listed they register and authorize with no
+    ``scope`` and end up with QC Database's read-only defaults. Defaults to the
+    same everyday-user set the stdio login registers with
+    (:data:`qcdatabase_mcp.auth.DEFAULT_SCOPES`); override with
+    ``QCDB_MCP_SCOPES`` (space- or comma-separated). Every value must be a scope
+    QCDatabase.AI grants, or client registration fails with ``invalid_scope``.
+
+    Advertising is NOT enforcement: ``required_scopes`` stays ``None`` so a
+    token the user approved with fewer scopes still connects, and the API keeps
+    enforcing per-endpoint scopes itself.
+    """
+    raw = os.environ.get("QCDB_MCP_SCOPES")
+    if raw is None or not raw.strip():
+        from .auth import DEFAULT_SCOPES
+        raw = DEFAULT_SCOPES
+    scopes: list[str] = []
+    for part in raw.replace(",", " ").split():
+        if _SCOPE_TOKEN.match(part) and part not in scopes:
+            scopes.append(part)
+    return scopes
 
 
 def auth_settings() -> AuthSettings:
