@@ -191,6 +191,9 @@ def auth_settings() -> AuthSettings:
         issuer_url=issuer_url(),
         resource_server_url=mcp_resource_url(),
         required_scopes=None,  # per-endpoint scopes are enforced by the API itself
+        # QCDBTokenVerifier validates each token against /api/whoami/; the AS does
+        # not bind tokens to this resource yet (see "Backend requirements" above).
+        validate_token_resource=False,
     )
 
 
