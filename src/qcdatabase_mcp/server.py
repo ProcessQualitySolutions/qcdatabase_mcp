@@ -3826,6 +3826,53 @@ def get_my_trainings() -> str:
     return _pretty(client().get("/api/trainings/me/"))
 
 
+# --- Trainings phase 3: competition (leaderboards, engagement) ---
+@_tool('Get Training Leaderboard', read_only=True)
+@_safe
+@_trainings
+def get_training_leaderboard(training_id: str, group_by: str = "user", project_id: str = "",
+                             period: str = "all", limit: int = 0) -> str:
+    """Any member who can play the training. A training GAME's leaderboard
+    (presentations have none): best score per person, ranked (ties share a
+    rank), plus your own row as `me` even if it's past the limit. group_by:
+    user (default), user_type, project_role (needs project_id for a
+    workspace-wide training) or project; those rank groups by the average of
+    their players' best scores. project_id narrows it to one project's
+    members; period: all (default), 30d, 90d, 365d. Quiz results never
+    appear on a leaderboard."""
+    params: dict[str, Any] = {"group_by": group_by or "user", "period": period or "all"}
+    if project_id:
+        params["project_id"] = project_id
+    if limit:
+        params["limit"] = int(limit)
+    return _pretty(client().get(f"/api/trainings/{training_id}/leaderboard/", **params))
+
+
+@_tool('Get Engagement Report', read_only=True)
+@_safe
+@_trainings
+def get_engagement_report(training_id: str = "", project_id: str = "", group_by: str = "",
+                          since: str = "", until: str = "") -> str:
+    """ADMIN ONLY, read-only. How people train beyond what's required, as
+    evidence of training culture for bids, prequalification and audits.
+    Without training_id: every training in scope with totals (a CSA's whole
+    workspace or one project; Project Admins must pass a project_id they
+    administer). With training_id: that training month by month, or by
+    group_by (user, user_type, project_role, project).
+    Metrics: learners, plays, completions, replays, voluntary_plays (played
+    without being assigned), engagement_plays (replays + voluntary first
+    plays), time_trained_sec, multiplayer, average_score_improvement,
+    quiz_pass_rate (aggregate only), and revise_candidate: a training many
+    complete and nobody replays, worth revising. since / until: YYYY-MM-DD.
+    Preview plays never count."""
+    params = {k: v for k, v in {"project_id": project_id, "since": since, "until": until}.items() if v}
+    if training_id:
+        if group_by:
+            params["group_by"] = group_by
+        return _pretty(client().get(f"/api/trainings/{training_id}/engagement/", **params))
+    return _pretty(client().get("/api/trainings/engagement/", **params))
+
+
 # ===========================================================================
 # Community forum (cross-tenant; see /api/forum/)
 # ===========================================================================

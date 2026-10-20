@@ -326,6 +326,20 @@ def test_read_tools_call_one_endpoint_each(calls):
     assert calls[0].url.params["project_id"] == "p1"
 
 
+def test_competition_tools(calls):
+    server.get_training_leaderboard("t1", group_by="user_type", period="30d", limit=10)
+    server.get_engagement_report(project_id="p1", since="2026-01-01")
+    server.get_engagement_report(training_id="t1", group_by="project")
+    assert [(c.method, c.url.path) for c in calls] == [
+        ("GET", "/api/trainings/t1/leaderboard/"),
+        ("GET", "/api/trainings/engagement/"),
+        ("GET", "/api/trainings/t1/engagement/"),
+    ]
+    assert dict(calls[0].url.params) == {"group_by": "user_type", "period": "30d", "limit": "10"}
+    assert dict(calls[1].url.params) == {"project_id": "p1", "since": "2026-01-01"}
+    assert dict(calls[2].url.params) == {"group_by": "project"}
+
+
 def test_training_required_reaches_the_agent_with_title_expiry_and_link(calls):
     calls.responses[("POST", "/api/mapping/items/i1/mark-accepted/")] = (403, {
         "code": "training_required", "detail": "Requires \"Weld Acceptance\" to accept Welds.",
