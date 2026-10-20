@@ -372,6 +372,17 @@ def test_crew_session_tools(calls):
     assert json.loads(calls[4].content) == {"project_id": "p2"}
 
 
+def test_build_request_tools(calls):
+    calls.responses[("GET", "/api/trainings/builds/")] = (200, {"count": 1, "results": [
+        {"id": "b1", "status": "in_progress", "training": {"id": "t1", "type": "presentation"}}]})
+    out = server.list_build_requests()
+    assert "b1" in out and "presentation" in out
+    server.get_build_request("b1")
+    assert [(c.method, c.url.path) for c in calls] == [
+        ("GET", "/api/trainings/builds/"), ("GET", "/api/trainings/builds/b1/")]
+    assert dict(calls[0].url.params) == {"status": "open"}
+
+
 def test_training_required_reaches_the_agent_with_title_expiry_and_link(calls):
     calls.responses[("POST", "/api/mapping/items/i1/mark-accepted/")] = (403, {
         "code": "training_required", "detail": "Requires \"Weld Acceptance\" to accept Welds.",
