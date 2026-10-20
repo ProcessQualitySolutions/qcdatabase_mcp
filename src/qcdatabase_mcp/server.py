@@ -3386,7 +3386,11 @@ def list_trainings(scope: str = "", project_id: str = "", status: str = "", owne
 def get_training(training_id: str) -> str:
     """Get one Training: status, owner, slug and address, the versions you can
     see with their review status (your own private versions included, with
-    can_play / can_submit), and the policy PDF revision."""
+    can_play / can_submit), and the policy PDF revision. policy_outdated=true
+    means the policy PDF was replaced after the current version was built:
+    regenerate it (get_training_policy, upload_training_version,
+    submit_training_review) or request an update from the build service on
+    the training page."""
     return _pretty(client().get(f"/api/trainings/{training_id}/"))
 
 
@@ -3766,7 +3770,8 @@ def assign_training(training_id: str, assignees: list[Any], project_id: str = ""
     (people not yet in the workspace are invited into project_id first), or objects:
     {type: 'user', user_id | email}, {type: 'user_type', user_type_id},
     {type: 'project_role', role: admin|manager|inspector|viewer},
-    {type: 'project'} (everyone in project_id), {type: 'tenant'} (everyone; CSAs).
+    {type: 'project'} (everyone in project_id), {type: 'tenant'} (everyone; CSAs),
+    {type: 'crew', crew_id} (everyone on a crew; see list_crews).
     Project Admins must pass a project_id they administer. due_at: ISO date.
     valid_for_days: how long a completion counts; recurring=True makes it due
     again when it expires (needs valid_for_days).
@@ -3996,9 +4001,11 @@ def list_build_requests(status: str = "open") -> str:
     no competition; a quiz is required). Delivery happens on the build console
     in the web app once a version passes review.
 
-    For a customer's CSAs and Project Admins: their requests and quotes.
-    Requesting, quoting and accepting happen in the web app only.
-    status='all' includes delivered and cancelled requests."""
+    For PQS staff (superusers): every request in every workspace; quote one
+    with quote_build_request. For a customer's CSAs and Project Admins: their
+    requests and quotes. Requesting a quote, accepting the bid, accepting the
+    training and change orders happen on the training page.
+    status='all' includes finished and cancelled requests."""
     payload = client().get("/api/trainings/builds/", status=status or "open")
     items = payload.get("results", payload) if isinstance(payload, dict) else payload
     return _render_list("Build requests:", items if isinstance(items, list) else [], "No build requests found.")
@@ -4012,6 +4019,40 @@ def get_build_request(build_request_id: str) -> str:
     type: game or not a game), status and builder; quotes for the customer's
     admins."""
     return _pretty(client().get(f"/api/trainings/builds/{build_request_id}/"))
+
+
+@_tool('Quote Build Request')
+@_safe
+@_trainings
+def quote_build_request(build_request_id: str, quote_usd: str, description: str = "",
+                        confirm: bool = False) -> str:
+    """PQS STAFF ONLY (superusers). Set the price (USD; "0" for no-charge
+    work such as a negotiated change order) and the description the customer
+    sees, on a request that is requested or quoted (re-quoting replaces the
+    quote). The customer and PQS staff are emailed; the customer accepts the
+    bid on the training page.
+
+    Without confirm=True this only PREVIEWS and sends nothing: the customer is
+    emailed, so confirm the price and wording first."""
+    if not confirm:
+        return (f"PREVIEW ONLY - nothing was sent. Call again with confirm=True to quote ${quote_usd} on build "
+                f"request {build_request_id}" + (f' with the description: "{description}"' if description else '')
+                + ". The customer and PQS staff will be emailed.")
+    return _pretty(client().post(f"/api/trainings/builds/{build_request_id}/quote/",
+                                 json={"quote_usd": str(quote_usd), "description": description}))
+
+
+@_tool('List Crews', read_only=True)
+@_safe
+@_trainings
+def list_crews(project_id: str = "") -> str:
+    """ADMIN ONLY. Crews you manage (CSAs: every crew; Project Admins: their
+    projects' crews): named groups of people, each with its members. Assign a
+    training to one with assign_training and {type: 'crew', crew_id}. Crews
+    are created and edited in the web app (Training Library > Crews)."""
+    payload = client().get("/api/trainings/crews/", **({"project_id": project_id} if project_id else {}))
+    items = payload.get("results", payload) if isinstance(payload, dict) else payload
+    return _render_list("Crews:", items if isinstance(items, list) else [], "No crews found.")
 
 
 # ===========================================================================

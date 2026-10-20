@@ -383,6 +383,20 @@ def test_build_request_tools(calls):
     assert dict(calls[0].url.params) == {"status": "open"}
 
 
+def test_quote_and_crew_tools(calls):
+    import json
+    assert server.quote_build_request("b1", "0", "Negotiated fix").startswith("PREVIEW ONLY")
+    assert not calls
+    server.quote_build_request("b1", "0", "Negotiated fix", confirm=True)
+    calls.responses[("GET", "/api/trainings/crews/")] = (200, {"count": 1, "results": [
+        {"id": "c1", "name": "Night shift", "members": []}]})
+    assert "Night shift" in server.list_crews(project_id="p1")
+    assert [(c.method, c.url.path) for c in calls] == [
+        ("POST", "/api/trainings/builds/b1/quote/"), ("GET", "/api/trainings/crews/")]
+    assert json.loads(calls[0].content) == {"quote_usd": "0", "description": "Negotiated fix"}
+    assert dict(calls[1].url.params) == {"project_id": "p1"}
+
+
 def test_training_required_reaches_the_agent_with_title_expiry_and_link(calls):
     calls.responses[("POST", "/api/mapping/items/i1/mark-accepted/")] = (403, {
         "code": "training_required", "detail": "Requires \"Weld Acceptance\" to accept Welds.",
