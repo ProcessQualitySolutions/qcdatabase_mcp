@@ -3719,6 +3719,113 @@ def get_training_review(training_id: str, upload_id: str = "", version_id: str =
     return "\n\n".join(parts)
 
 
+# --- Trainings phase 2: compliance (assignments, invites, gated permissions) ---
+def _people_list(people: Any) -> list[Any]:
+    if isinstance(people, str):
+        people = [p.strip() for p in people.replace(";", ",").split(",") if p.strip()]
+    if not isinstance(people, list) or not people:
+        raise ValueError("Give at least one email (or {email, first_name, last_name}).")
+    if len(people) > 200:
+        raise ValueError("At most 200 people per call; split the list.")
+    return people
+
+
+@_tool('Invite Users')
+@_safe
+@_trainings
+def invite_users(project_id: str, people: list[Any], role: str = "viewer", user_type_id: str = "",
+                 confirm: bool = False) -> str:
+    """ADMIN ONLY (Project Admin of that project, or CSA). Invite people by email
+    into a project, through QC Database's normal invite flow and seat rules.
+    people: emails, or {email, first_name, last_name}; at most 200. role: viewer
+    (default), inspector, manager (admin: CSAs only). Each person comes back as
+    invited (new account; it takes a seat and they get a set-password email),
+    added_to_project (existing account), already_member, or error.
+
+    Without confirm=True this only PREVIEWS the outcomes and changes nothing:
+    show the user the list and confirm before calling again with confirm=True."""
+    body = {"project_id": project_id, "people": _people_list(people), "role": role or "viewer",
+            "user_type_id": user_type_id or None, "confirm": bool(confirm)}
+    result = client().post("/api/trainings/invites/", json={k: v for k, v in body.items() if v is not None})
+    if isinstance(result, dict) and result.get("preview"):
+        return "PREVIEW ONLY - nothing was sent. Call again with confirm=True to invite.\n\n" + _pretty(result)
+    return _pretty(result)
+
+
+@_tool('Assign Training')
+@_safe
+@_trainings
+def assign_training(training_id: str, assignees: list[Any], project_id: str = "", due_at: str = "",
+                    valid_for_days: int = 0, recurring: bool = False, invite_role: str = "viewer",
+                    confirm: bool = False) -> str:
+    """ADMIN ONLY. Assign a PUBLISHED training. assignees (at most 200) are emails
+    (people not yet in the workspace are invited into project_id first), or objects:
+    {type: 'user', user_id | email}, {type: 'user_type', user_type_id},
+    {type: 'project_role', role: admin|manager|inspector|viewer},
+    {type: 'project'} (everyone in project_id), {type: 'tenant'} (everyone; CSAs).
+    Project Admins must pass a project_id they administer. due_at: ISO date.
+    valid_for_days: how long a completion counts; recurring=True makes it due
+    again when it expires (needs valid_for_days).
+
+    Without confirm=True this only PREVIEWS who it reaches and who would be
+    invited, and changes nothing: confirm with the user first."""
+    body: dict[str, Any] = {"assignees": _people_list(assignees), "confirm": bool(confirm),
+                            "recurring": bool(recurring), "invite_role": invite_role or "viewer"}
+    if project_id:
+        body["project_id"] = project_id
+    if due_at:
+        body["due_at"] = due_at
+    if valid_for_days:
+        body["valid_for_days"] = int(valid_for_days)
+    result = client().post(f"/api/trainings/{training_id}/assignments/", json=body)
+    if isinstance(result, dict) and result.get("preview"):
+        return "PREVIEW ONLY - nothing was assigned. Call again with confirm=True.\n\n" + _pretty(result)
+    return _pretty(result)
+
+
+@_tool('List Training Assignments', read_only=True)
+@_safe
+@_trainings
+def list_assignments(training_id: str = "", user_id: str = "", project_id: str = "") -> str:
+    """ADMIN ONLY. The Training Matrix: one row per (person, training) for
+    assigned and permission-linked trainings, with status (completed, due,
+    overdue, expired), due and expiry dates, and gate (ok, grace, blocked) where
+    the training is required for a permission. Project Admins must pass a
+    project_id they administer; CSAs may omit it for the whole workspace."""
+    params = {k: v for k, v in {"training_id": training_id, "user_id": user_id,
+                                 "project_id": project_id}.items() if v}
+    return _pretty(client().get("/api/trainings/assignments/", **params))
+
+
+@_tool('List Permission Requirements', read_only=True)
+@_safe
+@_trainings
+def list_permission_requirements(scope: str = "", project_id: str = "") -> str:
+    """ADMIN ONLY, read-only. Which permissions require a current training
+    (e.g. 'Accept Welds' needs 'Weld Acceptance', valid 365 days): the workspace
+    defaults (scope='tenant', CSAs) or what is in force in a project
+    (scope='project' + project_id). Requirements are set by a person in the QC
+    Database web app (Required trainings), never through this server."""
+    params = _training_scope_params(scope, project_id)
+    return _pretty(client().get("/api/trainings/permission-requirements/", **{
+        k: v for k, v in params.items() if v}))
+
+
+@_tool('Get My Trainings', read_only=True)
+@_safe
+@_trainings
+def get_my_trainings() -> str:
+    """Any member, one call: your trainings and where you stand. Each training
+    says whether it's REQUIRED (and why: an assignment, or a permission you hold
+    that needs it), its status (completed, due, overdue, expired, not_started,
+    not_completed), due / completed / expiry dates, your results (plays, best
+    score, last quiz score and pass), and the links to play it and read its
+    policy. Also lists every permission of yours that requires a training, with
+    ok / grace / blocked. Check this before a gated action (accepting welds,
+    unlocking a hold, filling a gated form) to warn the user early."""
+    return _pretty(client().get("/api/trainings/me/"))
+
+
 # ===========================================================================
 # Community forum (cross-tenant; see /api/forum/)
 # ===========================================================================

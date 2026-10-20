@@ -194,6 +194,8 @@ class QCClient:
             exc: Exception = AuthError(
                 "Your session is no longer valid. Run 'login' again."
             )
+        elif code == 403 and self._code(resp) == "training_required":
+            exc = APIError(self._training_required(resp))
         elif code == 403:
             exc = APIError(
                 "Access denied (403). You are signed in but are not a member of "
@@ -215,6 +217,33 @@ class QCClient:
         # download falling back from the base64 route to the raw export on 413).
         exc.status_code = code  # type: ignore[attr-defined]
         raise exc
+
+    @staticmethod
+    def _code(resp: httpx.Response) -> str:
+        try:
+            body = resp.json()
+        except ValueError:
+            return ""
+        return body.get("code", "") if isinstance(body, dict) and isinstance(body.get("code"), str) else ""
+
+    @staticmethod
+    def _training_required(resp: httpx.Response) -> str:
+        """A gated action refused for a missing or expired training: name the
+        training, the expiry and the link, so the assistant can tell the user
+        what to do (QCDATABASE_CHANGES 6a)."""
+        body = resp.json()
+        lines = [f"Training required (403) [code: training_required]. {body.get('detail') or ''}".rstrip()]
+        trainings = body.get("trainings") or ([body["training"]] if body.get("training") else [])
+        for t in trainings:
+            if not isinstance(t, dict):
+                continue
+            when = f"expired {str(t['expired_at'])[:10]}" if t.get("expired_at") else "not completed"
+            url = str(t.get("play_url") or "")
+            if url.startswith("/"):
+                url = BASE_URL + url
+            lines.append(f"- {t.get('title')} ({when}): take it at {url}")
+        lines.append("Tell the user which training to take; don't retry until they have completed it.")
+        return "\n".join(lines)
 
     @staticmethod
     def _detail(resp: httpx.Response) -> str:
