@@ -340,6 +340,38 @@ def test_competition_tools(calls):
     assert dict(calls[2].url.params) == {"group_by": "project"}
 
 
+def test_crew_session_tools(calls):
+    session = {"join_code": "SBKH3B", "status": "open", "join_url": "https://qc.test/trainings/join/SBKH3B/",
+               "qr": {"short_url": "https://qc.test/qr/abc", "image_base64": "iVBOR" * 500}}
+    calls.responses[("POST", "/api/trainings/t1/crew-sessions/")] = (201, session)
+    calls.responses[("GET", "/api/trainings/crew-sessions/SBKH3B/")] = (200, session)
+    calls.responses[("GET", "/api/trainings/crew-sessions/")] = (200, {"count": 1, "results": [session]})
+
+    preview = server.start_crew_session("t1", project_id="p1", notify=True)
+    assert preview.startswith("PREVIEW ONLY") and "p1" in preview
+    assert not calls
+    out = server.start_crew_session("t1", project_id="p1", notify=True, confirm=True)
+    assert "SBKH3B" in out and "https://qc.test/qr/abc" in out and "iVBOR" not in out
+    server.list_crew_sessions(status="all", training_id="t1")
+    out = server.get_crew_session("sbkh-3b")
+    assert "iVBOR" not in out
+    assert server.end_crew_session("SBKH3B").startswith("PREVIEW ONLY")
+    server.end_crew_session("SBKH3B", confirm=True)
+    assert server.invite_project_to_crew_session("SBKH3B", "p2").startswith("PREVIEW ONLY")
+    server.invite_project_to_crew_session("SBKH3B", "p2", confirm=True)
+    assert [(c.method, c.url.path) for c in calls] == [
+        ("POST", "/api/trainings/t1/crew-sessions/"),
+        ("GET", "/api/trainings/crew-sessions/"),
+        ("GET", "/api/trainings/crew-sessions/SBKH3B/"),
+        ("POST", "/api/trainings/crew-sessions/SBKH3B/end/"),
+        ("POST", "/api/trainings/crew-sessions/SBKH3B/notify/"),
+    ]
+    import json
+    assert json.loads(calls[0].content) == {"notify": True, "project_id": "p1"}
+    assert dict(calls[1].url.params) == {"status": "all", "training_id": "t1"}
+    assert json.loads(calls[4].content) == {"project_id": "p2"}
+
+
 def test_training_required_reaches_the_agent_with_title_expiry_and_link(calls):
     calls.responses[("POST", "/api/mapping/items/i1/mark-accepted/")] = (403, {
         "code": "training_required", "detail": "Requires \"Weld Acceptance\" to accept Welds.",

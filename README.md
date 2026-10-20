@@ -269,6 +269,12 @@ Then ask Claude to **"connect to QC Database"** to sign in — see below.
   with your own rank) and `get_engagement_report` (admins: replays, voluntary
   plays, time trained, multiplayer, score improvement and trainings nobody
   replays, for the workspace, a project or one training).
+- **Crew sessions (live multiplayer):** `start_crew_session` (a published
+  multiplayer training; returns the join code, join link and QR link the crew
+  scans to play together, optionally with an in-app invite to a project),
+  `list_crew_sessions`, `get_crew_session` (who joined, teams, results as games
+  finish), `end_crew_session` and `invite_project_to_crew_session`. Starting,
+  ending and inviting preview first and need `confirm=True`.
 - **Community forum (shared by all QC Database users):** `list_forum_boards`,
   `list_forum_posts` (filter by board, search, questions), `get_forum_post`,
   `list_forum_replies`, `create_forum_post` and `reply_to_forum_post` (optional
