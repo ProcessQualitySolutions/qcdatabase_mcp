@@ -3873,6 +3873,110 @@ def get_engagement_report(training_id: str = "", project_id: str = "", group_by:
     return _pretty(client().get("/api/trainings/engagement/", **params))
 
 
+# --- Trainings phase 4: crew sessions (live multiplayer) ---
+def _crew_session(payload: Any) -> Any:
+    """Drop the QR PNG (base64) from a session: agents share the short link."""
+    if isinstance(payload, dict):
+        qr = payload.get("qr")
+        if isinstance(qr, dict):
+            payload = {**payload, "qr": {"short_url": qr.get("short_url")}}
+        if isinstance(payload.get("session"), dict):
+            payload = {**payload, "session": _crew_session(payload["session"])}
+    return payload
+
+
+@_tool('Start Crew Session')
+@_safe
+@_trainings
+def start_crew_session(training_id: str, project_id: str = "", notify: bool = False,
+                       confirm: bool = False) -> str:
+    """Start a live crew session of a PUBLISHED MULTIPLAYER training: a foreman's
+    toolbox-talk replacement. The crew joins on their phones by scanning the QR
+    or opening join_url (or typing join_code at /trainings/join/), presses Play,
+    and plays together; team games split players into red and blue. The session
+    plays the version published now and stays open 4 hours or until ended.
+    Hosts: CSAs, Project Admins, Training Authors, and members unless a CSA
+    turned that off. project_id: for a workspace training, the project the
+    session is for (one you belong to). notify=True also sends that project's
+    members an in-app invite with the code and link.
+
+    Without confirm=True this only PREVIEWS what would happen and changes
+    nothing: confirm with the user first (notify reaches a whole project)."""
+    if not confirm:
+        who = (f" and send every member of project {project_id or 'the training'} an in-app invite"
+               if notify else "")
+        return ("PREVIEW ONLY - nothing was started. Call again with confirm=True to open a crew session "
+                f"of training {training_id}{who}. You'll get the join code, join link and QR link to share.")
+    body: dict[str, Any] = {"notify": bool(notify)}
+    if project_id:
+        body["project_id"] = project_id
+    return _pretty(_crew_session(client().post(f"/api/trainings/{training_id}/crew-sessions/", json=body)))
+
+
+@_tool('List Crew Sessions', read_only=True)
+@_safe
+@_trainings
+def list_crew_sessions(status: str = "open", training_id: str = "", limit: int = 0) -> str:
+    """Crew sessions you host, plus every session in the projects (Project
+    Admins) or workspace (CSAs) you administer, newest first: join code,
+    status (open / ended / expired), training, host, expiry and join_url.
+    status='all' includes ended and expired sessions."""
+    params: dict[str, Any] = {"status": status or "open"}
+    if training_id:
+        params["training_id"] = training_id
+    if limit:
+        params["limit"] = int(limit)
+    payload = client().get("/api/trainings/crew-sessions/", **params)
+    items = payload.get("results", payload) if isinstance(payload, dict) else payload
+    return _render_list("Crew sessions:", items if isinstance(items, list) else [], "No crew sessions found.")
+
+
+@_tool('Get Crew Session', read_only=True)
+@_safe
+@_trainings
+def get_crew_session(join_code: str) -> str:
+    """One crew session by its join code: status, join_url and QR short link
+    to share, who has joined (and their team), and results as each game
+    finishes (score, placement). For its host, its admins and anyone who can
+    join it."""
+    code = "".join(ch for ch in join_code.upper() if ch.isalnum())
+    return _pretty(_crew_session(client().get(f"/api/trainings/crew-sessions/{code}/")))
+
+
+@_tool('End Crew Session', idempotent=True)
+@_safe
+@_trainings
+def end_crew_session(join_code: str, confirm: bool = False) -> str:
+    """Close a crew session to new plays (its host, the workspace CSAs or the
+    project's Project Admins). Games already running finish and still record.
+
+    Without confirm=True this only PREVIEWS and changes nothing."""
+    code = "".join(ch for ch in join_code.upper() if ch.isalnum())
+    if not confirm:
+        return (f"PREVIEW ONLY - nothing was changed. Call again with confirm=True to end crew session {code}; "
+                "nobody can start a new game in it afterwards.")
+    return _pretty(_crew_session(client().post(f"/api/trainings/crew-sessions/{code}/end/")))
+
+
+@_tool('Invite Project to Crew Session')
+@_safe
+@_trainings
+def invite_project_to_crew_session(join_code: str, project_id: str, confirm: bool = False) -> str:
+    """Send every active member of project_id an in-app notification with the
+    crew session's join code and link (once per project per session). The
+    host or an admin; the project must be one you belong to (a project
+    training: its own project).
+
+    Without confirm=True this only PREVIEWS and sends nothing: confirm with
+    the user first."""
+    code = "".join(ch for ch in join_code.upper() if ch.isalnum())
+    if not confirm:
+        return (f"PREVIEW ONLY - nothing was sent. Call again with confirm=True to notify every member of "
+                f"project {project_id} about crew session {code}.")
+    return _pretty(_crew_session(client().post(f"/api/trainings/crew-sessions/{code}/notify/",
+                                               json={"project_id": project_id})))
+
+
 # ===========================================================================
 # Community forum (cross-tenant; see /api/forum/)
 # ===========================================================================
