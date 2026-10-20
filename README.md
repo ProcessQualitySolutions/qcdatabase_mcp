@@ -264,6 +264,11 @@ Then ask Claude to **"connect to QC Database"** to sign in — see below.
   gated permissions). Gated actions (accepting map items or ITP rows, lock actions, gated
   forms) can fail with `training_required`; the error names the training, its
   expiry and the link to take it.
+- **Training competition:** `get_training_leaderboard` (any member who can play
+  the game: ranked best scores by person, user type, project role or project,
+  with your own rank) and `get_engagement_report` (admins: replays, voluntary
+  plays, time trained, multiplayer, score improvement and trainings nobody
+  replays, for the workspace, a project or one training).
 - **Community forum (shared by all QC Database users):** `list_forum_boards`,
   `list_forum_posts` (filter by board, search, questions), `get_forum_post`,
   `list_forum_replies`, `create_forum_post` and `reply_to_forum_post` (optional
