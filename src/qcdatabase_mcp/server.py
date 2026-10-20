@@ -3347,7 +3347,11 @@ def create_training(title: str, scope: str = "tenant", project_id: str = "", ide
     scope='tenant' (company-wide; CSAs) or 'project' with project_id (Project Admins).
     Pass idea_brief (markdown: topic, objectives, audience, concept, must-cover
     points) and no bundle to create an IDEA row that a builder can pick up later.
-    training_type is 'game' or 'presentation'. slug (optional) becomes the
+    training_type is 'game' (scored: leaderboards) or 'presentation' (NOT a
+    game, for serious topics such as harassment training: no score is
+    recorded or shown; completion and the quiz still count). The bundle's
+    redline.json must declare the same type, or its review fails (uncharged);
+    only the owner and admins change it, on the training page. slug (optional) becomes the
     training's address https://<slug>.redline.school; one is generated otherwise.
     Next: attach the policy PDF with 'upload_training_policy', read
     'get_training_authoring_guide', start from 'get_training_template', then
@@ -3975,6 +3979,39 @@ def invite_project_to_crew_session(join_code: str, project_id: str, confirm: boo
                 f"project {project_id} about crew session {code}.")
     return _pretty(_crew_session(client().post(f"/api/trainings/crew-sessions/{code}/notify/",
                                                json={"project_id": project_id})))
+
+
+# --- Trainings phase 5: build service ---
+@_tool('List Build Requests', read_only=True)
+@_safe
+@_trainings
+def list_build_requests(status: str = "open") -> str:
+    """Build-service requests (PQS builds a training for a customer).
+
+    For a PQS Training Builder: the builds assigned to you. Work on one that is
+    in_progress with the usual tools and its training.id: get_training_idea,
+    get_training_policy, upload_training_version, then submit_training_review
+    (reviews are included in the build price: no charge). Build to
+    training.type: a 'presentation' is NOT a game (no score, no leaderboard,
+    no competition; a quiz is required). Delivery happens on the build console
+    in the web app once a version passes review.
+
+    For a customer's CSAs and Project Admins: their requests and quotes.
+    Requesting, quoting and accepting happen in the web app only.
+    status='all' includes delivered and cancelled requests."""
+    payload = client().get("/api/trainings/builds/", status=status or "open")
+    items = payload.get("results", payload) if isinstance(payload, dict) else payload
+    return _render_list("Build requests:", items if isinstance(items, list) else [], "No build requests found.")
+
+
+@_tool('Get Build Request', read_only=True)
+@_safe
+@_trainings
+def get_build_request(build_request_id: str) -> str:
+    """One build-service request: what to build (notes), the training (id,
+    type: game or not a game), status and builder; quotes for the customer's
+    admins."""
+    return _pretty(client().get(f"/api/trainings/builds/{build_request_id}/"))
 
 
 # ===========================================================================
