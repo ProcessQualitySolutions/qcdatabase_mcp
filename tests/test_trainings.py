@@ -292,3 +292,48 @@ def test_authoring_guide_renders_markdown(calls):
     out = server.get_training_authoring_guide("mobile")
     assert calls[0].url.params["part"] == "mobile"
     assert out.startswith("Pitfalls first.") and "## Mobile" in out and "quickstart" in out
+
+
+# --- phase 2: compliance -----------------------------------------------------
+def test_assign_training_previews_without_confirm(calls):
+    calls.responses[("POST", "/api/trainings/t1/assignments/")] = (200, {"preview": True, "assignments": []})
+    out = server.assign_training("t1", ["a@b.com"], project_id="p1", valid_for_days=365, recurring=True)
+    assert len(calls) == 1
+    body = json.loads(calls[0].content)
+    assert body == {"assignees": ["a@b.com"], "confirm": False, "recurring": True, "invite_role": "viewer",
+                    "project_id": "p1", "valid_for_days": 365}
+    assert out.startswith("PREVIEW ONLY")
+
+
+def test_invite_users_caps_and_confirms(calls):
+    assert server.invite_users("p1", [f"p{i}@x.com" for i in range(201)]).startswith("Error:")
+    assert calls == []
+    calls.responses[("POST", "/api/trainings/invites/")] = (200, {"preview": False, "results": []})
+    server.invite_users("p1", "a@b.com, c@d.com", confirm=True)
+    body = json.loads(calls[0].content)
+    assert body["people"] == ["a@b.com", "c@d.com"] and body["confirm"] is True
+
+
+def test_read_tools_call_one_endpoint_each(calls):
+    server.list_assignments(project_id="p1")
+    server.list_permission_requirements(scope="project", project_id="p1")
+    server.get_my_trainings()
+    assert [(c.method, c.url.path) for c in calls] == [
+        ("GET", "/api/trainings/assignments/"),
+        ("GET", "/api/trainings/permission-requirements/"),
+        ("GET", "/api/trainings/me/"),
+    ]
+    assert calls[0].url.params["project_id"] == "p1"
+
+
+def test_training_required_reaches_the_agent_with_title_expiry_and_link(calls):
+    calls.responses[("POST", "/api/mapping/items/i1/mark-accepted/")] = (403, {
+        "code": "training_required", "detail": "Requires \"Weld Acceptance\" to accept Welds.",
+        "trainings": [{"title": "Weld Acceptance", "expired_at": "2026-10-01T00:00:00Z",
+                       "play_url": "/trainings/t1/play/"}],
+    })
+    out = server.mark_map_item_accepted("i1")
+    assert "Training required" in out and "[code: training_required]" in out
+    assert "Weld Acceptance (expired 2026-10-01)" in out
+    assert "/trainings/t1/play/" in out and "don't retry" in out
+    assert "not a member" not in out

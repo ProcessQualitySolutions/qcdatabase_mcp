@@ -255,6 +255,15 @@ Then ask Claude to **"connect to QC Database"** to sign in — see below.
   take an explicit `scope` rather than the active project. Connections approved
   before Trainings existed must re-approve to get `trainings:read`/`trainings:write`.
   Publishing, delisting and reassigning owners stay in the QC Database web app.
+- **Training compliance:** `assign_training` and `invite_users` (admins; both
+  preview until `confirm=True`, at most 200 people), `list_assignments` (the
+  Training Matrix: completed / due / overdue / expired, and blocked / grace for
+  required trainings), `list_permission_requirements` (which permissions need a
+  current training; set only in the web app) and `get_my_trainings` (any
+  member, one call: required and completed trainings, results, links, and
+  gated permissions). Gated actions (accepting map items or ITP rows, lock actions, gated
+  forms) can fail with `training_required`; the error names the training, its
+  expiry and the link to take it.
 - **Community forum (shared by all QC Database users):** `list_forum_boards`,
   `list_forum_posts` (filter by board, search, questions), `get_forum_post`,
   `list_forum_replies`, `create_forum_post` and `reply_to_forum_post` (optional
