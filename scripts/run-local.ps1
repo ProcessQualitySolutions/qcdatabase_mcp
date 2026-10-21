@@ -20,7 +20,7 @@ if (-not (Test-Path ".venv")) {
     python -m venv .venv
 }
 
-& ".venv\Scripts\python.exe" -m pip install -q -e .
+& ".venv\Scripts\python.exe" -m pip install -q -e ".[runtime]"
 
 Write-Host ""
 Write-Host "Home page:    http://127.0.0.1:$Port/"

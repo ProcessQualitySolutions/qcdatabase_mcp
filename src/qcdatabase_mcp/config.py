@@ -11,8 +11,16 @@ import json
 import os
 import sys
 import tempfile
+import threading
+import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import IO, Any, Callable, Iterator
+
+if sys.platform.startswith("win"):
+    import msvcrt
+else:
+    import fcntl
 
 
 APP_DIR_NAME = "qcdatabase-mcp"
@@ -60,26 +68,62 @@ class Store:
             "token":     { "access_token": ..., "refresh_token": ..., ... },
             "settings":  { "active_project": { "id": ..., "name": ... } }
         }
+
+    Several stdio servers (one per AI session) share this file, so nothing is
+    cached in memory: every read goes to disk, and every write re-reads the file
+    under a cross-process lock and changes only its own key. The one exception is
+    the active project, which is per process (see :meth:`set_active_project`).
     """
 
     def __init__(self) -> None:
         self.path = _store_path()
-        self._data: dict[str, Any] = self._read()
+        self._lock_path = self.path.with_name(self.path.name + ".lock")
+        # A new session starts on the last project chosen in any session; after
+        # that, only this process's own choice applies.
+        self._active_project = self._read().get("settings", {}).get("active_project")
+
+    # ----- locking ------------------------------------------------------
+    @contextmanager
+    def lock(self) -> Iterator[None]:
+        """Hold the store exclusively, across processes and threads.
+
+        Re-entrant within a thread, so a caller can wrap a read-modify-write
+        sequence (e.g. a token refresh) around the store's own locked methods.
+        """
+        state = _lock_state(self._lock_path)
+        with state.thread_lock:
+            if state.depth == 0:
+                state.fh = _acquire_file_lock(self._lock_path)
+            state.depth += 1
+            try:
+                yield
+            finally:
+                state.depth -= 1
+                if state.depth == 0:
+                    _release_file_lock(state.fh)
+                    state.fh = None
 
     # ----- low level -----------------------------------------------------
     def _read(self) -> dict[str, Any]:
-        try:
-            with self.path.open("r", encoding="utf-8") as fh:
-                return json.load(fh)
-        except (FileNotFoundError, json.JSONDecodeError):
-            return {}
+        with self.lock():
+            try:
+                with self.path.open("r", encoding="utf-8") as fh:
+                    return json.load(fh)
+            except (FileNotFoundError, json.JSONDecodeError):
+                return {}
 
-    def _write(self) -> None:
+    def _update(self, change: Callable[[dict[str, Any]], None]) -> None:
+        with self.lock():
+            data = self._read()
+            change(data)
+            self._write(data)
+
+    def _write(self, data: dict[str, Any]) -> None:
         # Write atomically so a crash mid-write can never corrupt credentials.
         fd, tmp = tempfile.mkstemp(dir=str(self.path.parent), suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                json.dump(self._data, fh, indent=2)
+                json.dump(data, fh, indent=2)
             os.replace(tmp, self.path)
         finally:
             if os.path.exists(tmp):
@@ -95,32 +139,104 @@ class Store:
 
     # ----- OAuth client registration ------------------------------------
     def get_client(self, redirect_uri: str) -> dict[str, Any] | None:
-        return self._data.get("clients", {}).get(redirect_uri)
+        return self._read().get("clients", {}).get(redirect_uri)
 
     def set_client(self, redirect_uri: str, registration: dict[str, Any]) -> None:
-        self._data.setdefault("clients", {})[redirect_uri] = registration
-        self._write()
+        def change(d: dict[str, Any]) -> None:
+            d.setdefault("clients", {})[redirect_uri] = registration
+        self._update(change)
 
     # ----- token --------------------------------------------------------
     def get_token(self) -> dict[str, Any] | None:
-        return self._data.get("token")
+        return self._read().get("token")
 
     def set_token(self, token: dict[str, Any]) -> None:
-        self._data["token"] = token
-        self._write()
+        def change(d: dict[str, Any]) -> None:
+            d["token"] = token
+        self._update(change)
 
-    def clear_token(self) -> None:
-        self._data.pop("token", None)
-        self._write()
+    def clear_token(self, if_access_token: str | None = None) -> None:
+        """Forget the stored token.
+
+        With ``if_access_token``, only forget it if it is still that token: a
+        session whose token was rejected must not wipe a newer one that another
+        session has stored since.
+        """
+        def change(d: dict[str, Any]) -> None:
+            current = d.get("token") or {}
+            if if_access_token is None or current.get("access_token") == if_access_token:
+                d.pop("token", None)
+        self._update(change)
 
     # ----- settings (active project) ------------------------------------
     def get_active_project(self) -> dict[str, Any] | None:
-        return self._data.get("settings", {}).get("active_project")
+        return self._active_project
 
     def set_active_project(self, project: dict[str, Any] | None) -> None:
-        settings = self._data.setdefault("settings", {})
-        if project is None:
-            settings.pop("active_project", None)
+        """Switch this process's project and remember it for new sessions.
+
+        Other running sessions keep their own project: writes go to whatever
+        project is active, so one session must never retarget another.
+        """
+        self._active_project = project
+
+        def change(d: dict[str, Any]) -> None:
+            settings = d.setdefault("settings", {})
+            if project is None:
+                settings.pop("active_project", None)
+            else:
+                settings["active_project"] = project
+        self._update(change)
+
+
+# ---------------------------------------------------------------------------
+# Cross-process file lock
+# ---------------------------------------------------------------------------
+_LOCK_TIMEOUT = 60.0
+
+
+class _LockState:
+    def __init__(self) -> None:
+        self.thread_lock = threading.RLock()
+        self.depth = 0
+        self.fh: IO[bytes] | None = None
+
+
+_LOCK_STATES: dict[str, _LockState] = {}
+_LOCK_STATES_GUARD = threading.Lock()
+
+
+def _lock_state(path: Path) -> _LockState:
+    with _LOCK_STATES_GUARD:
+        return _LOCK_STATES.setdefault(str(path), _LockState())
+
+
+def _acquire_file_lock(path: Path) -> IO[bytes]:
+    fh = open(path, "a+b")
+    deadline = time.monotonic() + _LOCK_TIMEOUT
+    while True:
+        try:
+            if sys.platform.startswith("win"):
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fh
+        except OSError:
+            if time.monotonic() >= deadline:
+                fh.close()
+                raise TimeoutError(f"Timed out waiting for the lock on {path}") from None
+            time.sleep(0.05)
+
+
+def _release_file_lock(fh: IO[bytes] | None) -> None:
+    if fh is None:
+        return
+    try:
+        if sys.platform.startswith("win"):
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
         else:
-            settings["active_project"] = project
-        self._write()
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    finally:
+        fh.close()

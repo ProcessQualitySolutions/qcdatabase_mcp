@@ -11,6 +11,7 @@ Run: ``pytest`` (from the repo root, with ``pip install -e .`` or PYTHONPATH=src
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import io
 import os
 
@@ -129,7 +130,7 @@ def test_rewind_files_seeks_to_zero():
 def test_upload_retry_reuploads_full_body(monkeypatch):
     # First send 401, refresh, retry must see the full body (not zero bytes).
     seen = []
-    monkeypatch.setattr(clientmod, "refresh", lambda store, port: None)
+    monkeypatch.setattr(clientmod, "refresh", lambda store, port, **kw: None)
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(request.content)
@@ -437,12 +438,15 @@ class _FakeStore:
     def get_client(self, redirect_uri):
         return self._client
 
-    def clear_token(self):
+    def clear_token(self, if_access_token=None):
         self.cleared = True
         self._token = None
 
     def set_token(self, token):
         self._token = token
+
+    def lock(self):
+        return contextlib.nullcontext()
 
 
 def _patch_token_post(monkeypatch, status, data=None):

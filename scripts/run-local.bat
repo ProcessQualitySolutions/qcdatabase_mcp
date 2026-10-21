@@ -24,7 +24,7 @@ if not exist ".venv\Scripts\python.exe" (
     )
 )
 
-".venv\Scripts\python.exe" -m pip install -q -e .
+".venv\Scripts\python.exe" -m pip install -q -e ".[runtime]"
 if errorlevel 1 (
     echo ERROR: package install failed.
     pause

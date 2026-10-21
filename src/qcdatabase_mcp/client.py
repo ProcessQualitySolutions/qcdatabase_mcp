@@ -51,6 +51,11 @@ def _check_api_path(path: str) -> None:
             )
 
 
+def _sent_token(resp: httpx.Response) -> str:
+    """The bearer token the request behind ``resp`` was sent with."""
+    return resp.request.headers.get("Authorization", "").removeprefix("Bearer ")
+
+
 def _rewind_files(files: Any) -> None:
     """Seek every upload file handle back to the start before a retry.
 
@@ -168,7 +173,7 @@ class QCClient:
                 # stdio only: the token may have just expired server-side; force
                 # one refresh and retry. In hosted mode we cannot refresh someone
                 # else's token, so a 401 falls straight through to _handle.
-                refresh(self.store, self.port)
+                refresh(self.store, self.port, rejected=_sent_token(resp))
                 # The first send read any upload file handles to EOF; rewind them
                 # so the retry does not silently upload zero bytes.
                 _rewind_files(files)
@@ -190,7 +195,11 @@ class QCClient:
         detail = self._detail(resp)
         code = resp.status_code
         if code == 401:
-            self.store.clear_token()
+            if self._access_token is None:
+                # stdio: another session may have stored a newer token since.
+                self.store.clear_token(if_access_token=_sent_token(resp))
+            else:
+                self.store.clear_token()
             exc: Exception = AuthError(
                 "Your session is no longer valid. Run 'login' again."
             )
@@ -314,7 +323,7 @@ class QCClient:
         try:
             resp = _send()
             if resp.status_code == 401 and self._access_token is None:
-                refresh(self.store, self.port)
+                refresh(self.store, self.port, rejected=_sent_token(resp))
                 resp = _send()
         except httpx.HTTPError as exc:
             raise APIError(f"Could not reach QC Database: {exc}") from exc
