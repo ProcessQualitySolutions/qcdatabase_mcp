@@ -561,7 +561,9 @@ Hosted-mode configuration (flags override env):
 - `--issuer-url` / `QCDB_MCP_ISSUER_URL` — the OAuth authorization server (default
   `https://qcdatabase.ai`).
 - `QCDB_MCP_ALLOWED_HOSTS` / `QCDB_MCP_ALLOWED_ORIGINS` — extra allow-list entries
-  (comma-separated), e.g. when fronted by additional hostnames.
+  (comma-separated), e.g. when fronted by additional hostnames. The allowed origins
+  are also the only origins that get CORS headers on `/mcp`, so add a browser-based
+  client's origin here to let it connect.
 - `QCDB_MCP_SCOPES` — scopes advertised as `scopes_supported` in the
   protected-resource document and as `scope="..."` in the 401 challenge
   (space- or comma-separated). Defaults to the same everyday read + write set the

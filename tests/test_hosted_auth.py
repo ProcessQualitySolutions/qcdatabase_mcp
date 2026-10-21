@@ -172,3 +172,49 @@ def test_hosted_login_does_not_suggest_reconnecting(monkeypatch):
     result = server.login()
     assert "You are authenticated" in result
     assert "reconnect" not in result
+
+
+def test_metadata_authorization_server_matches_issuer_exactly(auth_app):
+    # The AS publishes issuer "https://qcdatabase.ai"; pydantic would add a "/".
+    client, _, _ = auth_app
+    for path in ("/.well-known/oauth-protected-resource",
+                 "/.well-known/oauth-protected-resource/mcp"):
+        assert client.get(path).json()["authorization_servers"] == [hosted.issuer_url()]
+    assert not hosted.issuer_url().endswith("/")
+
+
+def test_challenge_without_token_has_no_error(auth_app):
+    client, state, _ = auth_app
+    challenge = rpc(client, token=None).headers["www-authenticate"]
+    assert "error=" not in challenge
+    assert "resource_metadata=" in challenge and "scope=" in challenge
+    state["status"] = 401
+    rejected = rpc(client, token="bad-token").headers["www-authenticate"]
+    assert 'error="invalid_token"' in rejected
+    assert rejected.count("scope=") == 1
+
+
+def test_cors_preflight_and_401_for_allowed_origin(auth_app):
+    client, _, _ = auth_app
+    origin = "https://mcp.example.test"
+    pre = client.options("/mcp", headers={"Origin": origin,
+                                          "Access-Control-Request-Method": "POST",
+                                          "Access-Control-Request-Headers": "authorization"})
+    assert pre.status_code == 204
+    assert pre.headers["access-control-allow-origin"] == origin
+    assert "Authorization" in pre.headers["access-control-allow-headers"]
+    r = client.post("/mcp", headers={"Origin": origin, "Accept": "application/json, text/event-stream"},
+                    json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    assert r.status_code == 401
+    assert r.headers["access-control-allow-origin"] == origin
+    assert "WWW-Authenticate" in r.headers["access-control-expose-headers"]
+
+
+def test_cors_withheld_from_unlisted_origin(auth_app):
+    client, _, _ = auth_app
+    pre = client.options("/mcp", headers={"Origin": "https://evil.example",
+                                          "Access-Control-Request-Method": "POST"})
+    assert pre.status_code == 204
+    assert "access-control-allow-origin" not in pre.headers
+    r = client.post("/mcp", headers={"Origin": "https://evil.example"}, json={})
+    assert "access-control-allow-origin" not in r.headers
