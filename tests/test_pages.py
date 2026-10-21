@@ -73,7 +73,7 @@ def test_home_page_lists_capability_cards(monkeypatch):
     ):
         assert f"<h3>{title}</h3>" in html
     # Every template placeholder must be substituted (none may leak to the page).
-    for token in ("__ICON_B64__", "__MCP_ENDPOINT__", "__VERSION__", "__UPLOADS_LIMITATION__"):
+    for token in ("__ICON_B64__", "__MCP_ENDPOINT__", "__VERSION__", "__UPLOADS_LIMITATION__", "__TOOL_COUNT__"):
         assert token not in html
 
 

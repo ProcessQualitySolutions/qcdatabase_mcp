@@ -52,6 +52,7 @@ DEFAULT_SCOPES = (
     "shippers:read "
     "trainings:read trainings:write "
     "forum:read forum:write "
+    "qr:read qr:write "
     "manual:read"
 )
 

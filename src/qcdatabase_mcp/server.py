@@ -306,10 +306,16 @@ def _schema_field_names(definition: Any) -> list[str]:
     return []
 
 
+def _is_url(value: str) -> bool:
+    """A bare http(s) link. Signed object-storage URLs run well past the 600-char
+    trim, and a truncated link is useless, so these are never cut."""
+    return value.startswith(("https://", "http://")) and not any(c.isspace() for c in value)
+
+
 def _pretty(obj: Any) -> str:
     """Compact, readable JSON for a single resource, with huge blobs trimmed."""
     def trim(value: Any) -> Any:
-        if isinstance(value, str) and len(value) > 600:
+        if isinstance(value, str) and len(value) > 600 and not _is_url(value):
             return value[:600] + "... (truncated)"
         if isinstance(value, dict):
             return {k: trim(v) for k, v in value.items()}
@@ -339,7 +345,9 @@ def _fmt_value(value: Any) -> str:
         if isinstance(value, (dict, list))
         else str(value)
     )
-    return rendered[:600] + "... (truncated)" if len(rendered) > 600 else rendered
+    if len(rendered) <= 600 or (isinstance(value, str) and _is_url(value)):
+        return rendered
+    return rendered[:600] + "... (truncated)"
 
 
 def _render_list_items(payload: Any) -> str:
@@ -551,7 +559,7 @@ def _download_name(name_hint: str) -> str:
     return base.replace('"', "_")
 
 
-def _deliver_download(content: bytes, name_hint: str) -> Any:
+def _deliver_download(content: bytes, name_hint: str, as_link: bool = False) -> Any:
     """Hand a downloaded payload back in the way that fits the transport.
 
     * Local (stdio) server: write it to 'name_hint' on disk (a real path) and say
@@ -560,6 +568,8 @@ def _deliver_download(content: bytes, name_hint: str) -> Any:
       summary plus an embedded file resource the client can save - so an agent or
       any remote client actually receives the file without needing to reach a
       side-channel host. Oversized payloads fall back to a download link.
+    * Hosted server with ``as_link``: always return the download link, for
+      clients that mangle or can't save attached file resources.
     """
     if not hosted.hosted_enabled():
         out = _save_bytes(name_hint, content)
@@ -567,6 +577,12 @@ def _deliver_download(content: bytes, name_hint: str) -> Any:
 
     name = _download_name(name_hint)
     ctype = mimetypes.guess_type(name)[0] or "application/octet-stream"
+    if as_link:
+        where = _save_bytes(name, content)  # provider -> a GET link (raises if off)
+        return (
+            f"'{name}' ({len(content)} bytes, {ctype}) is ready to download from this "
+            f"link (it expires shortly):\n    {where}"
+        )
     if len(content) > _INLINE_DOWNLOAD_CAP:
         where = _save_bytes(name, content)  # provider -> a GET link (raises if off)
         return (
@@ -625,7 +641,8 @@ def _download_b64(path: str, **params: Any) -> dict[str, Any]:
 
 
 def _download_file(
-    b64_path: str, export_path: str, save_path: str, fallback_name: str, **params: Any
+    b64_path: str, export_path: str, save_path: str, fallback_name: str,
+    as_link: bool = False, **params: Any
 ) -> Any:
     """Download a file, preferring the proxy-safe base64 endpoint and falling back
     to the raw-binary export endpoint when the base64 route is missing (404/405) or
@@ -637,10 +654,10 @@ def _download_file(
         if getattr(exc, "status_code", None) not in (404, 405, 413):
             raise
         content, name = client().download(export_path, **params), ""
-    return _deliver_download(content, save_path or name or fallback_name)
+    return _deliver_download(content, save_path or name or fallback_name, as_link)
 
 
-def _deliver_image(env: dict[str, Any], name_hint: str) -> Any:
+def _deliver_image(env: dict[str, Any], name_hint: str, as_link: bool = False) -> Any:
     """Deliver a canvas image plus the pixel size and coordinate note an HTML /
     overlay builder needs to place map items without rescaling."""
     w, h = env.get("width"), env.get("height")
@@ -650,7 +667,7 @@ def _deliver_image(env: dict[str, Any], name_hint: str) -> Any:
         "in this image's top-left-origin space - drop the image into your HTML and "
         "place items at those coordinates with no rescaling."
     )
-    delivered = _deliver_download(env["content"], name_hint)
+    delivered = _deliver_download(env["content"], name_hint, as_link)
     if isinstance(delivered, list):
         return [TextContent(type="text", text=note), *delivered]
     return f"{note}\n{delivered}"
@@ -1289,19 +1306,24 @@ def upload_document_version(document_id: str, file_path: str, do_not_extract: bo
 
 @_tool('Download Document', structured_output=False)
 @_safe
-def download_document(document_id: str, save_path: str = "") -> Any:
+def download_document(document_id: str, save_path: str = "", as_link: bool = False) -> Any:
     """Download a document's original uploaded file.
 
     On the local (stdio) server it is written to 'save_path' on your disk. On the
     hosted server it is returned to you inline over the MCP connection (save it
     from the attached file resource); there 'save_path' is optional and only names
-    the file."""
+    the file.
+
+    On the hosted server, as_link=True returns a short-lived download link instead
+    of attaching the file - use it if your client corrupts or can't save attached
+    file resources."""
     pid = require_project()
     return _download_file(
         f"/api/documents/projects/{pid}/document/{document_id}/download/",
         f"/api/documents/projects/{pid}/document/{document_id}/export/",
         save_path,
         f"document-{document_id}",
+        as_link,
     )
 
 
@@ -1597,20 +1619,26 @@ def upload_large_format_drawing_version(lfd_id: str, file_path: str, do_not_extr
 
 @_tool('Export Drawing', structured_output=False)
 @_safe
-def export_drawing(drawing_id: str, save_path: str = "", variant: str = "clean", schema_id: str = "") -> Any:
+def export_drawing(drawing_id: str, save_path: str = "", variant: str = "clean", schema_id: str = "",
+                   as_link: bool = False) -> Any:
     """Render a drawing to a PDF. variant='clean' (default) is the bare drawing;
     variant='map' overlays its map items - give a schema_id to overlay only that
     schema's items, or omit it for the combined map of all.
 
     On the local (stdio) server the PDF is written to 'save_path' on disk; on the
     hosted server it is returned inline over the MCP connection (save it from the
-    attached file resource) and 'save_path' only names the file."""
+    attached file resource) and 'save_path' only names the file.
+
+    On the hosted server, as_link=True returns a short-lived download link instead
+    of attaching the file - use it if your client corrupts or can't save attached
+    file resources."""
     pid = require_project()
     return _download_file(
         f"/api/drawings/projects/{pid}/drawing/{drawing_id}/download/",
         f"/api/drawings/projects/{pid}/drawing/{drawing_id}/export/",
         save_path,
         f"drawing-{drawing_id}-{variant}.pdf",
+        as_link,
         variant=variant or None,
         schema_id=schema_id or None,
     )
@@ -1618,26 +1646,32 @@ def export_drawing(drawing_id: str, save_path: str = "", variant: str = "clean",
 
 @_tool('Export Large Format Drawing', structured_output=False)
 @_safe
-def export_large_format_drawing(lfd_id: str, save_path: str = "", variant: str = "clean") -> Any:
+def export_large_format_drawing(lfd_id: str, save_path: str = "", variant: str = "clean",
+                                as_link: bool = False) -> Any:
     """Render a large-format drawing to a PDF. variant='clean' (default) is the bare
     drawing; variant='flagged' includes the flagged overlay.
 
     On the local (stdio) server the PDF is written to 'save_path' on disk; on the
     hosted server it is returned inline over the MCP connection (save it from the
-    attached file resource) and 'save_path' only names the file."""
+    attached file resource) and 'save_path' only names the file.
+
+    On the hosted server, as_link=True returns a short-lived download link instead
+    of attaching the file - use it if your client corrupts or can't save attached
+    file resources."""
     pid = require_project()
     return _download_file(
         f"/api/drawings/projects/{pid}/large-format/{lfd_id}/download/",
         f"/api/drawings/projects/{pid}/large-format/{lfd_id}/export/",
         save_path,
         f"large-format-{lfd_id}-{variant}.pdf",
+        as_link,
         variant=variant or None,
     )
 
 
 @_tool('Get Drawing Image', structured_output=False)
 @_safe
-def get_drawing_image(drawing_id: str, save_path: str = "") -> Any:
+def get_drawing_image(drawing_id: str, save_path: str = "", as_link: bool = False) -> Any:
     """Get a drawing's rendered canvas image (PNG) - the raster you overlay map
     items onto when building an HTML view. The response states the image's pixel
     width/height; a map item's x_position/y_position are absolute pixels in that
@@ -1646,15 +1680,19 @@ def get_drawing_image(drawing_id: str, save_path: str = "") -> Any:
 
     On the local (stdio) server the image is written to 'save_path' on disk; on the
     hosted server it is returned inline over the MCP connection (save it from the
-    attached file resource) and 'save_path' only names the file."""
+    attached file resource) and 'save_path' only names the file.
+
+    On the hosted server, as_link=True returns a short-lived download link instead
+    of attaching the file - use it if your client corrupts or can't save attached
+    file resources."""
     pid = require_project()
     env = _download_b64(f"/api/drawings/projects/{pid}/drawing/{drawing_id}/image/")
-    return _deliver_image(env, save_path or env["filename"] or f"drawing-{drawing_id}.png")
+    return _deliver_image(env, save_path or env["filename"] or f"drawing-{drawing_id}.png", as_link)
 
 
 @_tool('Get Large Format Drawing Image', structured_output=False)
 @_safe
-def get_large_format_drawing_image(lfd_id: str, save_path: str = "") -> Any:
+def get_large_format_drawing_image(lfd_id: str, save_path: str = "", as_link: bool = False) -> Any:
     """Get a large-format drawing's rendered canvas image (PNG) - the raster you
     overlay map items onto when building an HTML view. The response states the
     image's pixel width/height; a map item's x_position/y_position are absolute
@@ -1663,10 +1701,14 @@ def get_large_format_drawing_image(lfd_id: str, save_path: str = "") -> Any:
 
     On the local (stdio) server the image is written to 'save_path' on disk; on the
     hosted server it is returned inline over the MCP connection (save it from the
-    attached file resource) and 'save_path' only names the file."""
+    attached file resource) and 'save_path' only names the file.
+
+    On the hosted server, as_link=True returns a short-lived download link instead
+    of attaching the file - use it if your client corrupts or can't save attached
+    file resources."""
     pid = require_project()
     env = _download_b64(f"/api/drawings/projects/{pid}/large-format/{lfd_id}/image/")
-    return _deliver_image(env, save_path or env["filename"] or f"large-format-{lfd_id}.png")
+    return _deliver_image(env, save_path or env["filename"] or f"large-format-{lfd_id}.png", as_link)
 
 
 # ===========================================================================

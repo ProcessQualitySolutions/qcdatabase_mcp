@@ -302,7 +302,7 @@ _HOME_TEMPLATE = """<!DOCTYPE html>
         <div class="wrap">
           <div style="margin-bottom:3.5rem">
             <h2>Capabilities</h2>
-            <p style="color:var(--muted);font-size:1.125rem;max-width:46rem;margin:0">Once connected, your AI assistant works the project end to end: reading, creating, and updating records across the whole quality workflow, from desktop or mobile. More than 80 tools span the areas below, plus notes and photos on supported records.</p>
+            <p style="color:var(--muted);font-size:1.125rem;max-width:46rem;margin:0">Once connected, your AI assistant works the project end to end: reading, creating, and updating records across the whole quality workflow, from desktop or mobile. __TOOL_COUNT__ tools span the areas below, plus notes and photos on supported records.</p>
           </div>
           <div class="cards four">
             <div class="card">
@@ -440,14 +440,17 @@ _UPLOADS_LIMITATION_CARD = """<div class="warn">
           """
 
 
-def home_page_html(uploads_enabled: bool = False) -> str:
+def home_page_html(uploads_enabled: bool = False, tool_count: int | None = None) -> str:
     """Render the home page for the current configuration.
 
     When ``uploads_enabled`` is True the 'Document Uploads' limitation card is
     omitted, because this hosted server supports remote uploads and downloads.
+    ``tool_count`` is the number of registered tools, so the copy never goes
+    stale; without it the page says "More than 100".
     """
     return (
         _HOME_TEMPLATE
+        .replace("__TOOL_COUNT__", str(tool_count) if tool_count else "More than 100")
         .replace("__UPLOADS_LIMITATION__", "" if uploads_enabled else _UPLOADS_LIMITATION_CARD)
         .replace("__MCP_ENDPOINT__", html.escape(hosted.resource_url() + "/mcp"))
         .replace("__VERSION__", html.escape(__version__))
@@ -473,7 +476,7 @@ def register_pages(mcp: FastMCP, uploads_enabled: bool = False) -> None:
 
     @mcp.custom_route("/", methods=["GET"])
     async def home(_request: Request) -> HTMLResponse:
-        return HTMLResponse(home_page_html(uploads_enabled))
+        return HTMLResponse(home_page_html(uploads_enabled, len(await mcp.list_tools())))
 
     @mcp.custom_route("/health", methods=["GET"])
     async def health(_request: Request) -> JSONResponse:
