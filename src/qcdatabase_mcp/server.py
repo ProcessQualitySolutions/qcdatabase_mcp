@@ -2645,12 +2645,14 @@ def mark_itp_accepted(item_id: str) -> str:
 # the user; never treat it as security tooling.
 #
 # Each lock is an instance of a project "lock type" (the named hold - what the
-# lock is FOR). Lock TYPES themselves - and who may place or clear each one - are
-# managed only in the web app's Project Admin, on purpose: that permission setup
-# is deliberate and must not be driven by an assistant. This server therefore
-# READS lock types (to place holds) but exposes no tool to create or edit them;
-# if a user asks to add/change a lock type, redirect them to Project Admin in the
-# web app. Only one active lock of a given type may sit on an item at a time.
+# lock is FOR). The API lets project admins create and edit lock TYPES (the
+# locks:write scope covers it), but who may place or clear each type - the
+# permission matrix - is set only in the web app's Project Admin, so an
+# API-created type can be placed by admins alone until someone configures it
+# there. This server therefore deliberately READS lock types (to place holds)
+# but exposes no tool to create or edit them, keeping hold-point setup in one
+# place; if a user asks to add/change a lock type, redirect them to Project
+# Admin in the web app. Only one active lock of a given type may sit on an item at a time.
 # Unlocking clears the restriction but KEEPS the lock on record as part of the
 # permanent quality history; the item stays held if any OTHER type of lock on it
 # is still locked. Deleting is a SOFT delete: the lock stops holding the item and
@@ -2702,10 +2704,11 @@ def list_lock_types() -> str:
     find the lock_type_id you need. Shows active and archived types.
 
     Read-only. There is deliberately no tool to create or edit lock types here.
-    Defining, renaming, recoloring, or archiving a hold point - and granting who may
-    place or clear it - is permission-sensitive project setup that must be done
-    carefully in the QC Database WEB APP (Project Admin -> Lock Types), not through an
-    assistant. If the user asks to add or change a lock type, DON'T attempt it: direct
+    The API does let project admins create and edit them, but granting who may
+    place or clear a type exists only in the QC Database WEB APP (Project Admin ->
+    Lock Types), so a type made elsewhere is unusable by non-admins until it is set
+    up there. Defining a hold point and its permissions belongs together in the web
+    app, not with an assistant. If the user asks to add or change a lock type, DON'T attempt it: direct
     them to Project Admin in the web app to manage lock types and their permissions
     there. (This tool only reads the types so you can place holds with 'add_lock'.)"""
     pid = require_project()
@@ -2938,13 +2941,15 @@ def create_reference_request(
     description: str = "",
 ) -> str:
     """Create a reference request (record that a source item still needs proof).
-    item_type is map_item, itp_item, or list_item. reference_type is 'document'
+    item_type is map_item, itp_line_item, or list_item. reference_type is 'document'
     (then give document_folder) or 'custom_form' (then give form_schema).
     Optionally assign it to a project member and add a description."""
     pid = require_project()
     payload: dict[str, Any] = {
         "reference_type": reference_type,
-        "item_type": item_type,
+        # This endpoint alone calls ITP line items 'itp_item'; every other tool
+        # (and the rest of the API) says 'itp_line_item', so accept that here.
+        "item_type": "itp_item" if item_type == "itp_line_item" else item_type,
         "item_id": item_id,
     }
     if document_folder:
@@ -2971,6 +2976,9 @@ def list_references(source_type: str, source_id: str) -> str:
     return _render_list(f"References on {source_type} {source_id}:", data)
 
 
+_REFERENCE_STATUSES = ("pass", "fail", "compliant", "non-compliant", "pending-review")
+
+
 @_tool('Create Reference')
 @_safe
 def create_reference(
@@ -2982,13 +2990,21 @@ def create_reference(
     note: str = "",
 ) -> str:
     """Link a source item to its proof - this is how a turnover package gets
-    completed. source_type is map_item, list_item, or itp_line_item. target_type
-    is 'document' or 'form' (a form submission). Creating a matching reference
-    fulfils any open reference request for that item."""
+    completed. source_type is map_item, list_item, itp_line_item, or drawing (to
+    attach a supporting document such as an MTR to a drawing). target_type is
+    'document' or 'form' (a form submission). status, when given, must be one of:
+    pass (the API default), fail, compliant, non-compliant, or pending-review
+    (a human has not yet decided). Creating a matching reference fulfils any open
+    reference request for that item."""
     pid = require_project()
     payload: dict[str, Any] = {"target_type": target_type, "target_id": target_id}
     if status:
-        payload["status"] = status
+        st = status.strip().lower()
+        if st not in _REFERENCE_STATUSES:
+            raise ValueError(
+                f"Unknown status '{status}'. Use one of: {', '.join(_REFERENCE_STATUSES)}."
+            )
+        payload["status"] = st
     if note:
         payload["note"] = note
     result = client().post(
@@ -3380,8 +3396,8 @@ def _manage_page(training_id: str) -> str:
 @_safe
 @_trainings
 def create_training(title: str, scope: str = "tenant", project_id: str = "", idea_brief: str = "",
-                    description: str = "", category: str = "", training_type: str = "game",
-                    slug: str = "") -> str:
+                    description: str = "", category: str = "", type: str = "game",
+                    slug: str = "", policy_visible_to_learners: bool | None = None) -> str:
     """Create a Training (a playable game or presentation shown inside QC Database).
     You become its single owner, the only person who can upload versions until
     one passes the security review.
@@ -3389,12 +3405,14 @@ def create_training(title: str, scope: str = "tenant", project_id: str = "", ide
     scope='tenant' (company-wide; CSAs) or 'project' with project_id (Project Admins).
     Pass idea_brief (markdown: topic, objectives, audience, concept, must-cover
     points) and no bundle to create an IDEA row that a builder can pick up later.
-    training_type is 'game' (scored: leaderboards) or 'presentation' (NOT a
+    type is 'game' (scored: leaderboards) or 'presentation' (NOT a
     game, for serious topics such as harassment training: no score is
     recorded or shown; completion and the quiz still count). The bundle's
     redline.json must declare the same type, or its review fails (uncharged);
     only the owner and admins change it, on the training page. slug (optional) becomes the
     training's address https://<slug>.redline.school; one is generated otherwise.
+    policy_visible_to_learners (API default true) controls whether learners can
+    see the attached policy; leave it unset unless the user asks.
     Next: attach the policy PDF with 'upload_training_policy', read
     'get_training_authoring_guide', start from 'get_training_template', then
     upload a free private version with 'upload_training_version'."""
@@ -3402,7 +3420,8 @@ def create_training(title: str, scope: str = "tenant", project_id: str = "", ide
     body = {k: v for k, v in {
         "title": title, "scope": params["scope"] or "tenant", "project_id": params["project_id"],
         "idea_brief": idea_brief or None, "description": description or None,
-        "category": category or None, "type": training_type or None, "slug": slug or None,
+        "category": category or None, "type": type or None, "slug": slug or None,
+        "policy_visible_to_learners": policy_visible_to_learners,
     }.items() if v is not None}
     return _pretty(client().post("/api/trainings/", json=body))
 
