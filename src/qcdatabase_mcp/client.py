@@ -205,6 +205,14 @@ class QCClient:
             )
         elif code == 403 and self._code(resp) == "training_required":
             exc = APIError(self._training_required(resp))
+        elif code == 403 and self._missing_scope(resp) is not None:
+            scope = self._missing_scope(resp)
+            exc = APIError(
+                "Access denied (403): your sign-in does not include the permission "
+                f"(OAuth scope{' ' + scope if scope else ''}) this action needs. "
+                "Sign in again (or reconnect the connector) and approve it. "
+                f"{detail}"
+            )
         elif code == 403:
             exc = APIError(
                 "Access denied (403). You are signed in but are not a member of "
@@ -234,6 +242,33 @@ class QCClient:
         except ValueError:
             return ""
         return body.get("code", "") if isinstance(body, dict) and isinstance(body.get("code"), str) else ""
+
+    @staticmethod
+    def _missing_scope(resp: httpx.Response) -> str | None:
+        """For a 403 caused by a token lacking a scope, the scope(s) needed ("" if
+        the server didn't say which); None for any other 403."""
+        challenge = resp.headers.get("WWW-Authenticate", "")
+        if "insufficient_scope" in challenge:
+            m = re.search(r'scope="([^"]*)"', challenge)
+            return m.group(1) if m else ""
+        try:
+            body = resp.json()
+        except ValueError:
+            return None
+        if not isinstance(body, dict):
+            return None
+        for key in ("required_scope", "required_scopes", "scope"):
+            value = body.get(key)
+            if isinstance(value, list):
+                value = " ".join(str(v) for v in value)
+            if isinstance(value, str) and value and (
+                key != "scope" or body.get("error") == "insufficient_scope"
+            ):
+                return value
+        text = " ".join(str(body.get(k) or "") for k in ("detail", "error", "error_description"))
+        if "insufficient_scope" in text or "grant the scope" in text:
+            return ""
+        return None
 
     @staticmethod
     def _training_required(resp: httpx.Response) -> str:
