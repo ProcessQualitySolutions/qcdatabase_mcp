@@ -39,7 +39,7 @@ if [ ! -d .venv ]; then
 fi
 
 # Re-install on every start so a git pull is all a deploy needs.
-.venv/bin/python -m pip install -q -e .
+.venv/bin/python -m pip install -q -e '.[runtime]'
 
 exec .venv/bin/python -m qcdatabase_mcp --http \
     --host "$QCDB_MCP_HOST" --port "$QCDB_MCP_PORT" \

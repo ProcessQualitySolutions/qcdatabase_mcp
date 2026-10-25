@@ -1,6 +1,3 @@
-> WARNING! Our apologies, but some of the modifications we made to allow remote hosting of this MCP server have broken the stdio tools. We are working on a fix ASAP. Please check back here later.
-
-
 # QC Database MCP Server
 
 A small program that lets an AI assistant (like Claude) do your everyday
@@ -63,12 +60,12 @@ You should see `Python 3.10` or higher. (On some Macs the command is `python3`.)
 From a terminal, in this folder:
 
 ```
-pip install .
+pip install ".[runtime]"
 ```
 
 That's it. This installs the server and a command called `qcdatabase-mcp`.
 
-> If `pip` isn't found, try `python -m pip install .` (or `python3 -m pip install .`).
+> If `pip` isn't found, try `python -m pip install ".[runtime]"` (or `python3 -m pip install ".[runtime]"`).
 
 ---
 
@@ -469,7 +466,7 @@ These rules are enforced in code by `_guard_local_path` in `server.py`.
 ## For developers
 
 ```
-pip install -e .            # editable install
+pip install -e '.[runtime]' # editable install
 python -m qcdatabase_mcp    # run the stdio server directly
 
 pip install -e '.[dev]'     # editable install + test deps

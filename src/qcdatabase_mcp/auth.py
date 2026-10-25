@@ -31,9 +31,11 @@ from . import BASE_URL
 from .config import Store
 
 # The everyday-user scope set: read everywhere, plus write where a daily-driver
-# actually needs it. Lists / shippers / tenants are read-only by design. This is
-# the permanent ceiling for the registered client, so it stays as narrow as the
-# "do real turnover work" goal allows.
+# actually needs it. Shippers / tenants are read-only by design; lists are
+# writable so an agent can seed a project's Welders / WPS / Heat Numbers lists.
+# This is the permanent ceiling for the registered client, so it stays as narrow
+# as the "do real turnover work" goal allows. Changing it makes existing installs
+# re-register once (see _register_client), after which users run 'login' again.
 DEFAULT_SCOPES = (
     "tenants:read "
     "projects:read projects:write "
@@ -48,7 +50,7 @@ DEFAULT_SCOPES = (
     "photos:read photos:write "
     "linespecs:read linespecs:write "
     "locks:read locks:write "
-    "lists:read "
+    "lists:read lists:write "
     "shippers:read "
     "trainings:read trainings:write "
     "forum:read forum:write "
@@ -147,7 +149,15 @@ def _redirect_uri(port: int) -> str:
 
 def _register_client(store: Store, redirect_uri: str) -> dict[str, Any]:
     cached = store.get_client(redirect_uri)
-    if cached and cached.get("client_id"):
+    # A registration's scope is its permanent ceiling, so register again when the
+    # scope set we ask for has changed. Compare against what we *requested*, not
+    # what was granted, so a server that trims scopes can't force a fresh
+    # registration on every login.
+    if (
+        cached
+        and cached.get("client_id")
+        and set(cached.get("requested_scope", "").split()) == set(DEFAULT_SCOPES.split())
+    ):
         return cached
 
     payload = {
@@ -167,6 +177,7 @@ def _register_client(store: Store, redirect_uri: str) -> dict[str, Any]:
     registration = resp.json()
     if not registration.get("client_id"):
         raise AuthError("Client registration succeeded but returned no client_id.")
+    registration["requested_scope"] = DEFAULT_SCOPES
     store.set_client(redirect_uri, registration)
     return registration
 
@@ -174,11 +185,14 @@ def _register_client(store: Store, redirect_uri: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Token persistence helpers
 # ---------------------------------------------------------------------------
-def _store_token(store: Store, token: dict[str, Any]) -> dict[str, Any]:
+def _store_token(store: Store, token: dict[str, Any], client_id: str) -> dict[str, Any]:
     expires_in = int(token.get("expires_in", 3600))
     # Refresh a minute early so a call never races the expiry.
     token = dict(token)
     token["expires_at"] = time.time() + max(expires_in - 60, 0)
+    # A refresh token only works with the client that issued it, which may not be
+    # the registration on file (e.g. a re-registration whose login never finished).
+    token["client_id"] = client_id
     store.set_token(token)
     return token
 
@@ -264,46 +278,62 @@ def login(store: Store, port: int, timeout: float = 300.0) -> dict[str, Any]:
         raise AuthError(f"Could not reach QC Database to get a token: {exc}") from exc
     if resp.status_code != 200:
         raise AuthError(f"Token exchange failed ({resp.status_code}): {resp.text[:300]}")
-    return _store_token(store, resp.json())
+    return _store_token(store, resp.json(), client_id)
 
 
-def refresh(store: Store, port: int) -> dict[str, Any]:
-    """Use the stored refresh token to get a fresh access token."""
-    token = store.get_token()
-    if not token or not token.get("refresh_token"):
-        raise AuthError("Not logged in. Run the 'login' tool first.")
-    redirect_uri = _redirect_uri(port)
-    registration = store.get_client(redirect_uri)
-    if not registration:
-        raise AuthError("No registered app on this callback port. Run 'login' again.")
+def refresh(store: Store, port: int, rejected: str | None = None) -> dict[str, Any]:
+    """Use the stored refresh token to get a fresh access token.
 
-    data = {
-        "grant_type": "refresh_token",
-        "refresh_token": token["refresh_token"],
-        "client_id": registration["client_id"],
-    }
-    try:
-        resp = httpx.post(_TOKEN_URL, data=data, timeout=30.0)
-    except httpx.HTTPError as exc:
-        # Network trouble is transient - keep the token so a retry can succeed.
-        raise AuthError(f"Could not reach QC Database to refresh the session: {exc}") from exc
-    if resp.status_code != 200:
-        # Only an invalid-grant style response means the refresh token is truly
-        # dead; clear it then. A transient 5xx must NOT log the user out.
-        if resp.status_code in (400, 401):
-            store.clear_token()
+    Refresh tokens rotate and several sessions share the store, so this runs
+    under the store's lock and first re-reads the token: if another session has
+    already refreshed, its token is used instead of spending a refresh token that
+    is no longer valid. ``rejected`` is the access token the API just answered
+    401 to; without it, a token that has not expired yet is reused as-is.
+    """
+    with store.lock():
+        token = store.get_token()
+        if not token or not token.get("refresh_token"):
+            raise AuthError("Not logged in. Run the 'login' tool first.")
+        if rejected is not None:
+            if token.get("access_token") != rejected:
+                return token
+        elif time.time() < token.get("expires_at", 0):
+            return token
+
+        client_id = token.get("client_id")
+        if not client_id:
+            registration = store.get_client(_redirect_uri(port))
+            if not registration:
+                raise AuthError("No registered app on this callback port. Run 'login' again.")
+            client_id = registration["client_id"]
+
+        data = {
+            "grant_type": "refresh_token",
+            "refresh_token": token["refresh_token"],
+            "client_id": client_id,
+        }
+        try:
+            resp = httpx.post(_TOKEN_URL, data=data, timeout=30.0)
+        except httpx.HTTPError as exc:
+            # Network trouble is transient - keep the token so a retry can succeed.
+            raise AuthError(f"Could not reach QC Database to refresh the session: {exc}") from exc
+        if resp.status_code != 200:
+            # Only an invalid-grant style response means the refresh token is truly
+            # dead; clear it then. A transient 5xx must NOT log the user out.
+            if resp.status_code in (400, 401):
+                store.clear_token(if_access_token=token.get("access_token"))
+                raise AuthError(
+                    "Your session expired and could not be refreshed. Run 'login' again."
+                )
             raise AuthError(
-                "Your session expired and could not be refreshed. Run 'login' again."
+                f"Could not refresh your session right now (server returned {resp.status_code}). "
+                "Please try again in a moment."
             )
-        raise AuthError(
-            f"Could not refresh your session right now (server returned {resp.status_code}). "
-            "Please try again in a moment."
-        )
-    new_token = resp.json()
-    # Rotation is on; the server may not re-send the refresh token, so keep ours.
-    if not new_token.get("refresh_token"):
-        new_token["refresh_token"] = token["refresh_token"]
-    return _store_token(store, new_token)
+        new_token = resp.json()
+        # Rotation is on; the server may not re-send the refresh token, so keep ours.
+        if not new_token.get("refresh_token"):
+            new_token["refresh_token"] = token["refresh_token"]
+        return _store_token(store, new_token, client_id)
 
 
 def ensure_access_token(store: Store, port: int) -> str:
