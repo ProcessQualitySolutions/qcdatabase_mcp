@@ -14,6 +14,8 @@ or auth is needed. Run: ``pytest`` (from the repo root).
 
 from __future__ import annotations
 
+import json
+
 from qcdatabase_mcp import server
 
 
@@ -194,3 +196,31 @@ def test_pretty_marks_truncated_long_arrays():
     # Bounding a huge array must leave a visible marker, not silently drop the tail.
     out = server._pretty({"items": list(range(120))})
     assert "more items truncated" in out
+
+
+# ---------------------------------------------------------------------------
+# Issue #18 - list_document_folders returns each extraction schema whole
+# ---------------------------------------------------------------------------
+def test_full_keys_are_never_trimmed():
+    long_schema = "heat_number: string\n" * 100  # ~2000 chars
+    row = {"id": "f1", "name": "MTR", "extraction_schema": long_schema, "description": "x" * 900}
+    out = server._render_row(1, row, frozenset({"extraction_schema"}))
+    assert json.dumps(long_schema) in out  # the schema, whole
+    assert out.count("... (truncated)") == 1  # other long fields still trimmed
+
+
+def test_list_document_folders_returns_full_schemas(monkeypatch):
+    long_schema = "\n".join(f"field_{i}: string - description {i}" for i in range(80))
+    rows = [{"id": "f1", "name": "MTR", "extraction_schema": long_schema,
+             "json_schema": {"properties": {f"field_{i}": {"type": "string"} for i in range(80)}}}]
+
+    class FakeClient:
+        def get_all(self, path):
+            assert path == "/api/projects/p1/schemas/documents/"
+            return rows
+
+    monkeypatch.setattr(server, "client", lambda: FakeClient())
+    monkeypatch.setattr(server, "require_project", lambda: "p1")
+    out = server.list_document_folders()
+    assert "truncated" not in out
+    assert "field_79: string - description 79" in out
