@@ -12,6 +12,7 @@ Pure unit tests: the network client is faked. Run: ``pytest`` (from the repo roo
 from __future__ import annotations
 
 import pytest
+from mcp.server.fastmcp.exceptions import ToolError
 
 from qcdatabase_mcp import server
 from qcdatabase_mcp.client import APIError
@@ -95,9 +96,8 @@ def test_schema_tools_surface_api_errors_as_text(monkeypatch, tool_name):
             raise err
 
     monkeypatch.setattr(server, "client", lambda: Fake())
-    out = _tool(tool_name)()
-    assert out.startswith("Error:")
-    assert "403" in out
+    with pytest.raises(ToolError, match="403"):
+        _tool(tool_name)()
 
 
 @pytest.mark.parametrize(
@@ -112,6 +112,5 @@ def test_schema_tools_require_a_pinned_project(monkeypatch, tool_name):
         store = _NoProject()
 
     monkeypatch.setattr(server, "client", lambda: Fake())
-    out = _tool(tool_name)()
-    assert out.startswith("Error:")
-    assert "set_project" in out
+    with pytest.raises(ToolError, match="set_project"):
+        _tool(tool_name)()

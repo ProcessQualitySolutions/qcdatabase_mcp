@@ -14,6 +14,7 @@ import json
 
 import httpx
 import pytest
+from mcp.server.fastmcp.exceptions import ToolError
 
 from qcdatabase_mcp import server
 from qcdatabase_mcp.client import QCClient
@@ -75,8 +76,8 @@ def test_reference_status_is_documented_and_validated(calls):
     for st in ("pass", "fail", "compliant", "non-compliant", "pending-review"):
         assert st in doc
 
-    out = server.create_reference("map_item", "m1", "document", "d1", status="passed")
-    assert out.startswith("Error:") and "pending-review" in out
+    with pytest.raises(ToolError, match="pending-review"):
+        server.create_reference("map_item", "m1", "document", "d1", status="passed")
     assert calls == []
 
     server.create_reference("map_item", "m1", "document", "d1", status="Pending-Review")

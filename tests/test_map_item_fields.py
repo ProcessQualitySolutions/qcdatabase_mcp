@@ -12,6 +12,7 @@ import json
 
 import httpx
 import pytest
+from mcp.server.fastmcp.exceptions import ToolError
 
 from qcdatabase_mcp import server
 from qcdatabase_mcp.client import QCClient
@@ -31,8 +32,9 @@ def calls(monkeypatch):
 
     def handler(request: httpx.Request):
         request.read()
-        seen.append(request)
-        return httpx.Response(200, json={"id": "m1"})
+        if request.method != "GET":
+            seen.append(request)
+        return httpx.Response(200, json={"id": "m1", "project": "p1"})
 
     http = httpx.Client(base_url="https://qc.test", transport=httpx.MockTransport(handler))
     monkeypatch.setattr(server, "client", lambda: QCClient(store=_Store(), access_token="tok", http=http))
@@ -68,23 +70,26 @@ def test_clear_second_point_and_assignee(calls):
 
 
 def test_second_point_must_come_in_pairs(calls):
-    assert server.update_map_item("m1", x_position_2=10.0).startswith("Error:")
-    assert server.update_map_item("m1", clear="x_position_2").startswith("Error:")
+    with pytest.raises(ToolError):
+        server.update_map_item("m1", x_position_2=10.0)
+    with pytest.raises(ToolError):
+        server.update_map_item("m1", clear="x_position_2")
     assert calls == []
 
 
 @pytest.mark.parametrize("status, tool", [("completed", "mark_map_item_complete"),
                                           ("Accepted", "mark_map_item_accepted")])
 def test_sign_off_statuses_are_refused(calls, status, tool):
-    out = server.update_map_item("m1", status=status)
-    assert out.startswith("Error:") and tool in out
-    out = server.create_map_item("d1", "s1", "W1", x_position=1.0, y_position=2.0, status=status)
-    assert out.startswith("Error:") and tool in out
+    with pytest.raises(ToolError, match=tool):
+        server.update_map_item("m1", status=status)
+    with pytest.raises(ToolError, match=tool):
+        server.create_map_item("d1", "s1", "W1", x_position=1.0, y_position=2.0, status=status)
     assert calls == []
 
 
 def test_unknown_status_is_refused(calls):
-    assert "planned" in server.update_map_item("m1", status="done")
+    with pytest.raises(ToolError, match="planned"):
+        server.update_map_item("m1", status="done")
     assert calls == []
 
 

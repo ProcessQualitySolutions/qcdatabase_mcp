@@ -198,8 +198,6 @@ class QCClient:
             if self._access_token is None:
                 # stdio: another session may have stored a newer token since.
                 self.store.clear_token(if_access_token=_sent_token(resp))
-            else:
-                self.store.clear_token()
             exc: Exception = AuthError(
                 "Your session is no longer valid. Run 'login' again."
             )
