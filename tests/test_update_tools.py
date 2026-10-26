@@ -12,6 +12,7 @@ import json
 
 import httpx
 import pytest
+from mcp.server.fastmcp.exceptions import ToolError
 
 from qcdatabase_mcp import server
 from qcdatabase_mcp.client import QCClient
@@ -68,8 +69,10 @@ def test_clear_empties_named_fields(calls):
 
 
 def test_clear_rejects_unknown_or_conflicting_fields(calls):
-    assert server.update_job("j1", clear="name").startswith("Error:")
-    assert server.update_job("j1", due_date="2026-12-01", clear="due_date").startswith("Error:")
+    with pytest.raises(ToolError):
+        server.update_job("j1", clear="name")
+    with pytest.raises(ToolError):
+        server.update_job("j1", due_date="2026-12-01", clear="due_date")
     assert calls == []
 
 
@@ -88,7 +91,8 @@ def test_metadata_is_merged_into_existing(calls):
 
 
 def test_metadata_must_be_an_object(calls):
-    assert server.update_job("j1", metadata="[1, 2]").startswith("Error:")
+    with pytest.raises(ToolError):
+        server.update_job("j1", metadata="[1, 2]")
 
 
 def test_update_package_pcf_and_status(calls):

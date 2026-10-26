@@ -31,13 +31,14 @@ from uuid import UUID
 
 import httpx
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import BlobResourceContents, EmbeddedResource, TextContent, ToolAnnotations
 
 from . import BASE_URL
 from . import zipmap as zm
 from .auth import AuthError, login as run_login
 from .client import APIError, QCClient
-from .config import config_dir
+from .config import SessionChangedError, config_dir
 from . import hosted
 
 # Hosted-mode file transfer (uploads/downloads via object storage). This optional
@@ -95,8 +96,9 @@ def _tool(title: str, *, read_only: bool = False, destructive: bool = False,
     ``read_only`` means the tool touches nothing - tools that can save a file
     locally (``save_path``) are not read-only even though they only fetch data.
     ``destructive`` marks tools that delete or overwrite existing records;
-    additive creates/uploads and reversible status changes are not destructive.
+    additive creates/uploads are not destructive; consequential sign-offs are.
     """
+    kwargs.setdefault("structured_output", False)
     return mcp.tool(
         title=title,
         annotations=ToolAnnotations(
@@ -754,19 +756,19 @@ def _zipmap_members(file_path: str) -> tuple[dict[str, bytes], bool]:
 
 
 def _safe(fn):
-    """Wrap a tool so library errors come back as clear text, not tracebacks.
+    """Report known failures as MCP tool errors, not successful text results.
 
     Uses functools.wraps so FastMCP still sees the original signature (it
     introspects the function to build each tool's input schema).
     """
     @functools.wraps(fn)
-    def wrapper(*args: Any, **kwargs: Any) -> str:
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
         try:
             return fn(*args, **kwargs)
-        except (AuthError, APIError, NeedsProject, OSError, ValueError) as exc:
+        except (AuthError, APIError, NeedsProject, SessionChangedError, OSError, ValueError) as exc:
             # OSError subsumes FileNotFoundError and PermissionError, so an
-            # unwritable download path or unreadable upload becomes clean text.
-            return f"Error: {exc}"
+            # unwritable download path or unreadable upload is a tool error too.
+            raise ToolError(str(exc)) from exc
     return wrapper
 
 
@@ -2115,7 +2117,28 @@ def update_map_item(
         raise ValueError("Give (or clear) x_position_2 and y_position_2 together.")
     if not payload:
         return "Nothing to update. Supply at least one field to change (or name fields in 'clear')."
-    result = client().patch(f"/api/mapping/items/{item_id}/", json=payload)
+    import math
+    for key in ("x_position", "y_position", "x_position_2", "y_position_2"):
+        value = payload.get(key)
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+        ):
+            raise ValueError(f"{key} must be a finite number.")
+    if "label" in payload and (
+        not isinstance(payload["label"], str) or not payload["label"].strip()
+        or len(payload["label"]) > 100
+    ):
+        raise ValueError("label must be a nonblank string of at most 100 characters.")
+    pid = require_project()
+    c = client()
+    current = c.get(f"/api/mapping/items/{item_id}/")
+    project = current.get("project") if isinstance(current, dict) else None
+    if isinstance(project, dict):
+        project = project.get("id")
+    if not project or str(project) != str(pid):
+        raise ValueError("Map item does not have a verified active-project membership.")
+    result = c.patch(f"/api/mapping/items/{item_id}/", json=payload)
     return f"Map item {item_id} updated.\n\n{_pretty(result)}"
 
 
@@ -2225,7 +2248,7 @@ def bulk_update_map_items(drawing_id: str, schema_id: str, items: str) -> str:
     return f"{msg}\n\n{_pretty(result)}"
 
 
-@_tool('Mark Map Item Complete', idempotent=True)
+@_tool('Mark Map Item Complete', destructive=True, idempotent=True)
 @_safe
 def mark_map_item_complete(item_id: str) -> str:
     """Mark a map item complete. This is a buy-off recorded under YOUR name and
@@ -2237,7 +2260,7 @@ def mark_map_item_complete(item_id: str) -> str:
     )
 
 
-@_tool('Mark Map Item Accepted', idempotent=True)
+@_tool('Mark Map Item Accepted', destructive=True, idempotent=True)
 @_safe
 def mark_map_item_accepted(item_id: str) -> str:
     """Mark a map item accepted (must already be complete). This is a buy-off
@@ -2680,7 +2703,7 @@ def update_form_submission(
     return f"Form submission {submission_id} updated.\n\n{_pretty(result)}"
 
 
-@_tool('Complete Form Submission', idempotent=True)
+@_tool('Complete Form Submission', destructive=True, idempotent=True)
 @_safe
 def complete_form_submission(submission_id: str) -> str:
     """Mark a form submission complete. Completed forms are evidence that can
@@ -2882,7 +2905,7 @@ def update_itp_line_item(
     return f"ITP line item {item_id} updated.\n\n{_pretty(result)}"
 
 
-@_tool('Mark ITP Complete', idempotent=True)
+@_tool('Mark ITP Complete', destructive=True, idempotent=True)
 @_safe
 def mark_itp_complete(item_id: str) -> str:
     """Mark an ITP line item complete. This is a buy-off recorded under YOUR name.
@@ -2893,7 +2916,7 @@ def mark_itp_complete(item_id: str) -> str:
     return f"ITP line item {item_id} marked complete (recorded as your sign-off).\n\n{_pretty(result)}"
 
 
-@_tool('Mark ITP Accepted', idempotent=True)
+@_tool('Mark ITP Accepted', destructive=True, idempotent=True)
 @_safe
 def mark_itp_accepted(item_id: str) -> str:
     """Mark an ITP line item accepted (must already be complete). This is a buy-off
@@ -3078,7 +3101,7 @@ def add_lock(
     )
 
 
-@_tool('Unlock Lock')
+@_tool('Unlock Lock', destructive=True)
 @_safe
 def unlock_lock(lock_id: str) -> str:
     """Clear the hold on a quality-hold lock (mark it unlocked) - i.e. record that

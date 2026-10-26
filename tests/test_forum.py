@@ -6,6 +6,7 @@ import json
 
 import httpx
 import pytest
+from mcp.server.fastmcp.exceptions import ToolError
 
 from qcdatabase_mcp import server
 from qcdatabase_mcp.client import QCClient
@@ -73,8 +74,10 @@ def test_list_posts_omits_unset_filters(calls):
 
 
 def test_bad_paging_never_calls_the_api(calls):
-    assert server.list_forum_posts(page_size=500).startswith("Error:")
-    assert server.list_forum_replies("p1", page=0).startswith("Error:")
+    with pytest.raises(ToolError):
+        server.list_forum_posts(page_size=500)
+    with pytest.raises(ToolError):
+        server.list_forum_replies("p1", page=0)
     assert calls == []
 
 
@@ -130,16 +133,16 @@ def test_reply_without_parent_omits_it(calls):
 
 def test_banned_user_error_passes_through(calls):
     calls.responses[("POST", "/api/forum/posts/p1/replies/")] = (403, {"detail": "You are banned from the forum."})
-    out = server.reply_to_forum_post("p1", "hi")
-    assert out.startswith("Error:") and "banned" in out
-    assert "forum:read / forum:write" not in out
+    with pytest.raises(ToolError, match="banned") as exc:
+        server.reply_to_forum_post("p1", "hi")
+    assert "forum:read / forum:write" not in str(exc.value)
 
 
 def test_missing_scope_explains_reconsent(calls):
     calls.responses[("GET", "/api/forum/boards/")] = (403, {"detail": "The access token does not grant the scope required for this request."})
-    out = server.list_forum_boards()
-    assert "lacks the forum:read / forum:write access" in out
-    assert "login" in out
+    with pytest.raises(ToolError, match="lacks the forum:read / forum:write access") as exc:
+        server.list_forum_boards()
+    assert "login" in str(exc.value)
 
 
 def test_forum_scopes_are_requested():

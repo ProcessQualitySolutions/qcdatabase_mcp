@@ -230,9 +230,9 @@ def test_handle_sets_status_code_on_apierror(code):
     assert ei.value.status_code == code  # the download fallback keys off this
 
 
-def test_handle_401_clears_token_and_sets_status_code():
+def test_hosted_401_preserves_local_token_and_sets_status_code():
     # access_token set => hosted path: a 401 falls straight through to _handle
-    # (no refresh/retry), which clears the token and raises AuthError. Assert the
+    # (no refresh/retry), which must not clear unrelated local credentials. Assert the
     # status is attached there too, since any status-aware caller relies on it.
     from qcdatabase_mcp import auth
 
@@ -244,7 +244,7 @@ def test_handle_401_clears_token_and_sets_status_code():
     c = QCClient(store=store, access_token="tok", http=http)
     with pytest.raises(auth.AuthError) as ei:
         c.get("/api/x/")
-    assert store.cleared is True
+    assert store.cleared is False
     assert ei.value.status_code == 401
 
 

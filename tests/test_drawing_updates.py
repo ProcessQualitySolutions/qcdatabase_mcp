@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from mcp.server.fastmcp.exceptions import ToolError
 
 from qcdatabase_mcp import server
 from qcdatabase_mcp.client import APIError
@@ -115,9 +116,9 @@ def test_update_drawing_rejects_blank_title_and_revision(monkeypatch, field, val
     fake = _FakeClient()
     monkeypatch.setattr(server, "client", lambda: fake)
 
-    out = _tool("update_drawing")("drawing-1", **{field: value})
-
-    assert out == f"Error: '{field}' must not be blank."
+    with pytest.raises(ToolError) as exc:
+        _tool("update_drawing")("drawing-1", **{field: value})
+    assert str(exc.value) == f"'{field}' must not be blank."
     assert fake.calls == []
 
 
@@ -138,9 +139,9 @@ def test_update_drawing_rejects_invalid_types_and_lengths(
     fake = _FakeClient()
     monkeypatch.setattr(server, "client", lambda: fake)
 
-    out = _tool("update_drawing")("drawing-1", **{field: value})
-
-    assert out == f"Error: {message}"
+    with pytest.raises(ToolError) as exc:
+        _tool("update_drawing")("drawing-1", **{field: value})
+    assert str(exc.value) == message
     assert fake.calls == []
 
 
@@ -150,13 +151,12 @@ def test_update_drawing_does_not_patch_when_valid_and_invalid_values_are_mixed(
     fake = _FakeClient()
     monkeypatch.setattr(server, "client", lambda: fake)
 
-    out = _tool("update_drawing")(
-        "drawing-1",
-        drawing_number="ISO-101",
-        revision="R" * 21,
-    )
-
-    assert out == "Error: 'revision' must be at most 20 characters."
+    with pytest.raises(ToolError, match="'revision' must be at most 20 characters"):
+        _tool("update_drawing")(
+            "drawing-1",
+            drawing_number="ISO-101",
+            revision="R" * 21,
+        )
     assert fake.calls == []
 
 
@@ -193,10 +193,8 @@ def test_update_drawing_fails_closed_when_project_mismatches_or_is_missing(
     fake = _FakeClient(drawing=drawing)
     monkeypatch.setattr(server, "client", lambda: fake)
 
-    out = _tool("update_drawing")("drawing-1", title="Unsafe update")
-
-    assert out.startswith("Error:")
-    assert message in out
+    with pytest.raises(ToolError, match=message):
+        _tool("update_drawing")("drawing-1", title="Unsafe update")
     assert not any(call[0] == "patch" for call in fake.calls)
 
 
@@ -205,10 +203,8 @@ def test_update_drawing_requires_active_project(monkeypatch):
     fake.store = _Store(project={})
     monkeypatch.setattr(server, "client", lambda: fake)
 
-    out = _tool("update_drawing")("drawing-1", title="New title")
-
-    assert out.startswith("Error:")
-    assert "No project is set" in out
+    with pytest.raises(ToolError, match="No project is set"):
+        _tool("update_drawing")("drawing-1", title="New title")
     assert fake.calls == []
 
 
@@ -222,9 +218,8 @@ def test_update_drawing_surfaces_api_errors(monkeypatch, failing_method):
     setattr(fake, failing_method, fail)
     monkeypatch.setattr(server, "client", lambda: fake)
 
-    out = _tool("update_drawing")("drawing-1", revision="D")
-
-    assert out == "Error: API rejected drawing update"
+    with pytest.raises(ToolError, match="API rejected drawing update"):
+        _tool("update_drawing")("drawing-1", revision="D")
 
 
 def test_update_drawing_is_registered_with_mutation_metadata():

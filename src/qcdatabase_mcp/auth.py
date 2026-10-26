@@ -28,7 +28,7 @@ from typing import Any
 import httpx
 
 from . import BASE_URL
-from .config import Store
+from .config import SessionChangedError, Store
 
 # The everyday-user scope set: read everywhere, plus write where a daily-driver
 # actually needs it. Shippers / tenants are read-only by design; lists are
@@ -149,6 +149,11 @@ def _redirect_uri(port: int) -> str:
 
 
 def _register_client(store: Store, redirect_uri: str) -> dict[str, Any]:
+    with store.lock():
+        return _register_client_locked(store, redirect_uri)
+
+
+def _register_client_locked(store: Store, redirect_uri: str) -> dict[str, Any]:
     cached = store.get_client(redirect_uri)
     # A registration's scope is its permanent ceiling, so register again when the
     # scope set we ask for has changed. Compare against what we *requested*, not
@@ -186,7 +191,9 @@ def _register_client(store: Store, redirect_uri: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Token persistence helpers
 # ---------------------------------------------------------------------------
-def _store_token(store: Store, token: dict[str, Any], client_id: str) -> dict[str, Any]:
+def _store_token(
+    store: Store, token: dict[str, Any], client_id: str, *, new_session: bool = False,
+) -> dict[str, Any]:
     expires_in = int(token.get("expires_in", 3600))
     # Refresh a minute early so a call never races the expiry.
     token = dict(token)
@@ -194,7 +201,10 @@ def _store_token(store: Store, token: dict[str, Any], client_id: str) -> dict[st
     # A refresh token only works with the client that issued it, which may not be
     # the registration on file (e.g. a re-registration whose login never finished).
     token["client_id"] = client_id
-    store.set_token(token)
+    if new_session:
+        store.set_token(token, new_session=True)
+    else:
+        store.set_token(token)
     return token
 
 
@@ -279,10 +289,17 @@ def login(store: Store, port: int, timeout: float = 300.0) -> dict[str, Any]:
         raise AuthError(f"Could not reach QC Database to get a token: {exc}") from exc
     if resp.status_code != 200:
         raise AuthError(f"Token exchange failed ({resp.status_code}): {resp.text[:300]}")
-    return _store_token(store, resp.json(), client_id)
+    return _store_token(store, resp.json(), client_id, new_session=True)
 
 
 def refresh(store: Store, port: int, rejected: str | None = None) -> dict[str, Any]:
+    try:
+        return _refresh_locked(store, port, rejected)
+    except SessionChangedError as exc:
+        raise AuthError(str(exc)) from exc
+
+
+def _refresh_locked(store: Store, port: int, rejected: str | None) -> dict[str, Any]:
     """Use the stored refresh token to get a fresh access token.
 
     Refresh tokens rotate and several sessions share the store, so this runs
@@ -296,7 +313,8 @@ def refresh(store: Store, port: int, rejected: str | None = None) -> dict[str, A
         if not token or not token.get("refresh_token"):
             raise AuthError("Not logged in. Run the 'login' tool first.")
         if rejected is not None:
-            if token.get("access_token") != rejected:
+            if (token.get("access_token") != rejected
+                    and time.time() < token.get("expires_at", 0)):
                 return token
         elif time.time() < token.get("expires_at", 0):
             return token
@@ -330,7 +348,8 @@ def refresh(store: Store, port: int, rejected: str | None = None) -> dict[str, A
                 f"Could not refresh your session right now (server returned {resp.status_code}). "
                 "Please try again in a moment."
             )
-        new_token = resp.json()
+        # Omitted identity/scope metadata is not a change of login.
+        new_token = {**token, **resp.json()}
         # Rotation is on; the server may not re-send the refresh token, so keep ours.
         if not new_token.get("refresh_token"):
             new_token["refresh_token"] = token["refresh_token"]
@@ -342,7 +361,10 @@ def ensure_access_token(store: Store, port: int) -> str:
 
     Raises :class:`AuthError` if the user has never logged in.
     """
-    token = store.get_token()
+    try:
+        token = store.get_token()
+    except SessionChangedError as exc:
+        raise AuthError(str(exc)) from exc
     if not token:
         raise AuthError("Not logged in. Run the 'login' tool first.")
     if time.time() >= token.get("expires_at", 0):

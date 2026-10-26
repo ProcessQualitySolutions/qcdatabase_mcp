@@ -3,6 +3,7 @@
 import json
 
 import pytest
+from mcp.server.fastmcp.exceptions import ToolError
 
 from qcdatabase_mcp import server
 from qcdatabase_mcp.client import APIError
@@ -69,14 +70,15 @@ def test_exact_requests_and_full_saved_record(api):
 @pytest.mark.parametrize("field", ["drawing", "package"])
 @pytest.mark.parametrize("value", ["", " ", "../schemas/map-items", "x?y=1", "not-uuid", None, 123])
 def test_invalid_ids_never_reach_api(api, field, value):
-    out = move(**{field: value})
-    assert "must be a nonempty UUID" in out
+    with pytest.raises(ToolError, match="must be a nonempty UUID"):
+        move(**{field: value})
     assert api.calls == []
 
 
 def test_requires_project(api):
     api.project = None
-    assert "No project is set" in move()
+    with pytest.raises(ToolError, match="No project is set"):
+        move()
     assert api.calls == []
 
 
@@ -84,7 +86,8 @@ def test_requires_project(api):
 @pytest.mark.parametrize("record", [{}, None, [], {"project": "other"}, {"project": {}}])
 def test_bad_or_foreign_records_fail_closed(api, path, record):
     api.records[path] = record
-    assert move().startswith("Error:")
+    with pytest.raises(ToolError):
+        move()
     assert not any(call[0] == "PATCH" for call in api.calls)
 
 
@@ -92,7 +95,9 @@ def test_bad_or_foreign_records_fail_closed(api, path, record):
 @pytest.mark.parametrize("message", ["Not found (404)", "Access denied (403)", "Rejected (400)", "Unavailable (503)"])
 def test_api_errors_surface_without_success(api, stage, message):
     api.failure, api.message = stage, message
-    assert move() == f"Error: {message}"
+    with pytest.raises(ToolError) as exc:
+        move()
+    assert str(exc.value) == message
     if stage != "PATCH":
         assert not any(call[0] == "PATCH" for call in api.calls)
 

@@ -11,6 +11,7 @@ import zipfile
 
 import httpx
 import pytest
+from mcp.server.fastmcp.exceptions import ToolError
 
 from qcdatabase_mcp import server
 from qcdatabase_mcp.client import QCClient
@@ -62,7 +63,8 @@ def test_create_training_posts_scope_and_brief(calls):
 
 
 def test_project_scope_needs_project_id(calls):
-    assert server.list_trainings(scope="project").startswith("Error:")
+    with pytest.raises(ToolError):
+        server.list_trainings(scope="project")
     assert calls == []
 
 
@@ -144,8 +146,8 @@ def test_upload_rejected_by_prechecks_lists_the_errors(calls, redline, tmp_path)
 def test_upload_refuses_a_non_redline_url(calls, redline, tmp_path):
     calls.responses[("POST", "/api/trainings/t1/versions/upload-url/")] = (201, {
         "upload_id": "u1", "zip_url": "https://evil.example/upload"})
-    out = server.upload_training_version("t1", folder_path=str(_bundle(tmp_path)))
-    assert out.startswith("Error:") and "redline.school" in out
+    with pytest.raises(ToolError, match="redline.school"):
+        server.upload_training_version("t1", folder_path=str(_bundle(tmp_path)))
     assert redline == []
 
 
@@ -170,8 +172,9 @@ def test_hosted_upload_forwards_a_begin_upload_zip(calls, redline, monkeypatch):
 def test_hosted_upload_needs_a_zip(calls, redline, monkeypatch):
     monkeypatch.setattr(server.hosted, "hosted_enabled", lambda: True)
     monkeypatch.setattr(server, "_read_hosted_upload", lambda handle: ("x.html", b"<!doctype html>"))
-    out = server.upload_training_version("t1", folder_path="handle-1")
-    assert out.startswith("Error:") and calls == [] and redline == []
+    with pytest.raises(ToolError):
+        server.upload_training_version("t1", folder_path="handle-1")
+    assert calls == [] and redline == []
 
 
 def test_submit_without_confirmation_only_previews(calls):
@@ -194,8 +197,8 @@ def test_submit_with_confirmation(calls):
 def test_error_codes_pass_through(calls):
     calls.responses[("POST", "/api/trainings/t1/versions/v1/submit-review/")] = (
         402, {"detail": "AI credits are too low.", "code": "insufficient_ai_credits"})
-    out = server.submit_training_review("t1", "v1", confirm_charge=True)
-    assert "insufficient_ai_credits" in out
+    with pytest.raises(ToolError, match="insufficient_ai_credits"):
+        server.submit_training_review("t1", "v1", confirm_charge=True)
 
 
 def test_template_lists_then_unpacks_into_a_new_folder(calls, redline, tmp_path):
@@ -214,13 +217,15 @@ def test_unpack_refuses_unsafe_paths_and_non_empty_folders(calls, redline, tmp_p
     url = "https://redline.school/templates/solo-2d.zip"
     calls.responses[("GET", "/api/trainings/templates/")] = (200, {"templates": [{"name": "solo-2d", "url": url}]})
     redline.responses[("GET", "redline.school/templates/solo-2d.zip")] = (200, _zip({"../evil.js": "x"}))
-    out = server.get_training_template("solo-2d", folder=str(tmp_path / "a"))
-    assert "unsafe path" in out and not (tmp_path / "evil.js").exists()
+    with pytest.raises(ToolError, match="unsafe path"):
+        server.get_training_template("solo-2d", folder=str(tmp_path / "a"))
+    assert not (tmp_path / "evil.js").exists()
     (tmp_path / "b").mkdir()
     (tmp_path / "b" / "keep.txt").write_text("mine")
     redline.responses[("GET", "redline.school/templates/solo-2d.zip")] = (200, _zip({"keep.txt": "x"}))
-    out = server.get_training_template("solo-2d", folder=str(tmp_path / "b"))
-    assert "isn't an empty folder" in out and (tmp_path / "b" / "keep.txt").read_text() == "mine"
+    with pytest.raises(ToolError, match="isn't an empty folder"):
+        server.get_training_template("solo-2d", folder=str(tmp_path / "b"))
+    assert (tmp_path / "b" / "keep.txt").read_text() == "mine"
 
 
 def test_download_version_unpacks_the_reviewed_bundle(calls, redline, tmp_path):
@@ -235,14 +240,15 @@ def test_download_version_unpacks_the_reviewed_bundle(calls, redline, tmp_path):
 def test_download_version_refuses_unreviewed(calls, redline):
     calls.responses[("GET", "/api/trainings/t1/versions/v1/bundle/")] = (
         409, {"detail": "Only a version that passed the security review can be downloaded.", "code": "not_reviewed"})
-    assert "not_reviewed" in server.download_training_version("t1", "v1")
+    with pytest.raises(ToolError, match="not_reviewed"):
+        server.download_training_version("t1", "v1")
 
 
 def test_missing_scope_explains_reconsent(calls):
     calls.responses[("GET", "/api/trainings/t1/")] = (403, {"detail": "The access token does not grant the scope required for this request."})
-    out = server.get_training("t1")
-    assert "lacks the trainings:read / trainings:write access" in out
-    assert "login" in out
+    with pytest.raises(ToolError, match="lacks the trainings:read / trainings:write access") as exc:
+        server.get_training("t1")
+    assert "login" in str(exc.value)
 
 
 def test_policy_upload_sends_an_idempotency_key(calls, tmp_path):
@@ -260,7 +266,8 @@ def test_policy_remove(calls):
     calls.responses[("DELETE", "/api/trainings/t1/policy/")] = (200, {"removed_revision": 2})
     out = server.upload_training_policy("t1", remove=True)
     assert calls[0].method == "DELETE" and "removed_revision" in out
-    assert server.upload_training_policy("t1", "x.pdf", remove=True).startswith("Error:")
+    with pytest.raises(ToolError):
+        server.upload_training_policy("t1", "x.pdf", remove=True)
 
 
 def test_validate_computes_the_manifest_locally_without_contents(calls, tmp_path):
@@ -306,7 +313,8 @@ def test_assign_training_previews_without_confirm(calls):
 
 
 def test_invite_users_caps_and_confirms(calls):
-    assert server.invite_users("p1", [f"p{i}@x.com" for i in range(201)]).startswith("Error:")
+    with pytest.raises(ToolError):
+        server.invite_users("p1", [f"p{i}@x.com" for i in range(201)])
     assert calls == []
     calls.responses[("POST", "/api/trainings/invites/")] = (200, {"preview": False, "results": []})
     server.invite_users("p1", "a@b.com, c@d.com", confirm=True)
@@ -403,7 +411,9 @@ def test_training_required_reaches_the_agent_with_title_expiry_and_link(calls):
         "trainings": [{"title": "Weld Acceptance", "expired_at": "2026-10-01T00:00:00Z",
                        "play_url": "/trainings/t1/play/"}],
     })
-    out = server.mark_map_item_accepted("i1")
+    with pytest.raises(ToolError) as exc:
+        server.mark_map_item_accepted("i1")
+    out = str(exc.value)
     assert "Training required" in out and "[code: training_required]" in out
     assert "Weld Acceptance (expired 2026-10-01)" in out
     assert "/trainings/t1/play/" in out and "don't retry" in out

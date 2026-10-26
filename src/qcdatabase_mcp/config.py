@@ -13,6 +13,8 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
+from copy import deepcopy
 from contextlib import contextmanager
 from pathlib import Path
 from typing import IO, Any, Callable, Iterator
@@ -25,6 +27,10 @@ else:
 
 APP_DIR_NAME = "qcdatabase-mcp"
 STORE_FILENAME = "store.json"
+
+
+class SessionChangedError(RuntimeError):
+    """A different login invalidated this process's active project."""
 
 
 def config_dir(create: bool = True) -> Path:
@@ -76,11 +82,20 @@ class Store:
     """
 
     def __init__(self) -> None:
-        self.path = _store_path()
+        self.path = _store_path().resolve()
         self._lock_path = self.path.with_name(self.path.name + ".lock")
         # A new session starts on the last project chosen in any session; after
         # that, only this process's own choice applies.
-        self._active_project = self._read().get("settings", {}).get("active_project")
+        data = self._read()
+        self._session_id = data.get("session_id")
+        self._active_project = data.get("settings", {}).get("active_project")
+
+    def _sync_session(self, data: dict[str, Any]) -> bool:
+        if self._session_id == data.get("session_id"):
+            return False
+        self._session_id = data.get("session_id")
+        self._active_project = None
+        return True
 
     # ----- locking ------------------------------------------------------
     @contextmanager
@@ -109,7 +124,7 @@ class Store:
             try:
                 with self.path.open("r", encoding="utf-8") as fh:
                     return json.load(fh)
-            except (FileNotFoundError, json.JSONDecodeError):
+            except FileNotFoundError:
                 return {}
 
     def _update(self, change: Callable[[dict[str, Any]], None]) -> None:
@@ -148,10 +163,21 @@ class Store:
 
     # ----- token --------------------------------------------------------
     def get_token(self) -> dict[str, Any] | None:
-        return self._read().get("token")
+        with self.lock():
+            data = self._read()
+            if self._sync_session(data):
+                raise SessionChangedError(
+                    "The saved login changed in another process. The active project "
+                    "was cleared; select a project again before retrying."
+                )
+            return data.get("token")
 
-    def set_token(self, token: dict[str, Any]) -> None:
+    def set_token(self, token: dict[str, Any], *, new_session: bool = False) -> None:
         def change(d: dict[str, Any]) -> None:
+            if new_session:
+                d["session_id"] = uuid.uuid4().hex
+                d.setdefault("settings", {}).pop("active_project", None)
+                self._sync_session(d)
             d["token"] = token
         self._update(change)
 
@@ -166,11 +192,16 @@ class Store:
             current = d.get("token") or {}
             if if_access_token is None or current.get("access_token") == if_access_token:
                 d.pop("token", None)
+                d["session_id"] = uuid.uuid4().hex
+                d.setdefault("settings", {}).pop("active_project", None)
+                self._sync_session(d)
         self._update(change)
 
     # ----- settings (active project) ------------------------------------
     def get_active_project(self) -> dict[str, Any] | None:
-        return self._active_project
+        with self.lock():
+            self._sync_session(self._read())
+            return deepcopy(self._active_project)
 
     def set_active_project(self, project: dict[str, Any] | None) -> None:
         """Switch this process's project and remember it for new sessions.
@@ -178,9 +209,9 @@ class Store:
         Other running sessions keep their own project: writes go to whatever
         project is active, so one session must never retarget another.
         """
-        self._active_project = project
-
         def change(d: dict[str, Any]) -> None:
+            self._sync_session(d)
+            self._active_project = deepcopy(project)
             settings = d.setdefault("settings", {})
             if project is None:
                 settings.pop("active_project", None)
@@ -202,17 +233,20 @@ class _LockState:
         self.fh: IO[bytes] | None = None
 
 
-_LOCK_STATES: dict[str, _LockState] = {}
+_LOCK_STATES: dict[tuple[int, str], _LockState] = {}
 _LOCK_STATES_GUARD = threading.Lock()
 
 
 def _lock_state(path: Path) -> _LockState:
     with _LOCK_STATES_GUARD:
-        return _LOCK_STATES.setdefault(str(path), _LockState())
+        return _LOCK_STATES.setdefault((os.getpid(), str(path.resolve())), _LockState())
 
 
 def _acquire_file_lock(path: Path) -> IO[bytes]:
     fh = open(path, "a+b")
+    if sys.platform.startswith("win") and os.fstat(fh.fileno()).st_size == 0:
+        fh.write(b"\0")
+        fh.flush()
     deadline = time.monotonic() + _LOCK_TIMEOUT
     while True:
         try:

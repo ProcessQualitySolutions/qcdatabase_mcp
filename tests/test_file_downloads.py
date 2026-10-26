@@ -20,6 +20,7 @@ from __future__ import annotations
 import base64
 
 import pytest
+from mcp.server.fastmcp.exceptions import ToolError
 
 from qcdatabase_mcp import server
 from qcdatabase_mcp.client import APIError
@@ -160,10 +161,10 @@ def test_download_does_not_fall_back_on_other_errors(monkeypatch, tmp_path):
             return b"x"
 
     monkeypatch.setattr(server, "client", lambda: Fake())
-    out = _tool("export_drawing")("dr-1", str(tmp_path / "d.pdf"))
+    with pytest.raises(ToolError, match="403"):
+        _tool("export_drawing")("dr-1", str(tmp_path / "d.pdf"))
 
     assert "download" not in seen  # a 403 must NOT trigger the raw fallback
-    assert "Error:" in out and "403" in out  # surfaced as clean text via _safe
 
 
 # ---------------------------------------------------------------------------
@@ -220,5 +221,5 @@ def test_image_tool_surfaces_malformed_envelope(monkeypatch, tmp_path):
             return {"success": False, "detail": "no image yet"}
 
     monkeypatch.setattr(server, "client", lambda: Fake())
-    out = _tool("get_drawing_image")("dr-1", str(tmp_path / "img.png"))
-    assert "Error:" in out  # a bad/failed envelope is reported, not silently empty
+    with pytest.raises(ToolError):
+        _tool("get_drawing_image")("dr-1", str(tmp_path / "img.png"))
