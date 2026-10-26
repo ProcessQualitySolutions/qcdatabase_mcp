@@ -189,8 +189,10 @@ Then ask Claude to **"connect to QC Database"** to sign in — see below.
 - **Controlled-vocabulary lists:** `create_list_item`, `update_list_item`,
   `delete_list_item` (a soft delete — the entry stops appearing in list reads but
   stays on record)
-- **Jobs & packages:** `list_jobs`, `create_job`, `list_packages`,
-  `create_package`, `list_line_specs`, `create_line_spec`
+- **Projects, jobs & packages:** `update_project`, `list_jobs`, `create_job`,
+  `update_job`, `list_packages`, `create_package`, `update_package`,
+  `list_line_specs`, `create_line_spec`, `update_line_spec` (updates change only
+  the fields you pass; name a field in `clear` to empty it)
 - **Upload records:** `upload_document`, `upload_document_version`,
   `download_document`, `upload_drawing`, `upload_large_format_drawing`,
   `upload_drawing_to_package`, `upload_drawing_version`,

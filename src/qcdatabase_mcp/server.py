@@ -400,6 +400,42 @@ def _parse_json_arg(name: str, raw: str) -> Any:
         raise ValueError(f"'{name}' must be valid JSON. {exc}") from exc
 
 
+def _update_payload(fields: dict[str, Any], clear: str, clearable: dict[str, Any]) -> dict[str, Any]:
+    """PATCH body for an update tool: only the fields the caller supplied.
+
+    A blank string or None means "leave unchanged", so an argument a client
+    fills in with "" can never wipe a field. To empty a field on purpose the
+    caller names it in 'clear' (comma separated); it is sent as that field's
+    empty value from 'clearable' (null for dates and links, "" for text).
+    """
+    payload = {k: v for k, v in fields.items() if v is not None and v != ""}
+    for name in (n.strip() for n in (clear or "").split(",")):
+        if not name:
+            continue
+        if name not in clearable:
+            raise ValueError(f"'{name}' can't be cleared. Clearable fields: {', '.join(clearable)}.")
+        if name in payload:
+            raise ValueError(f"'{name}' was both given a value and listed in 'clear'.")
+        payload[name] = clearable[name]
+    return payload
+
+
+def _merged_metadata(path: str, raw: str) -> dict[str, Any]:
+    """The record at 'path' with the JSON object 'raw' merged into its current
+    metadata: supplied keys overwrite, a key set to null is removed, untouched
+    keys are kept. Sending only the new keys could replace the stored object."""
+    changes = _parse_json_arg("metadata", raw)
+    if not isinstance(changes, dict):
+        raise ValueError("'metadata' must be a JSON object, e.g. {\"area\": \"North\"}.")
+    merged = dict(client().get(path).get("metadata") or {})
+    for key, value in changes.items():
+        if value is None:
+            merged.pop(key, None)
+        else:
+            merged[key] = value
+    return merged
+
+
 _PACKAGE_DIR = Path(__file__).resolve().parent
 
 
@@ -880,6 +916,44 @@ def get_active_project() -> str:
     return f"Active project: {proj.get('name', proj['id'])} ({proj['id']})"
 
 
+@_tool('Update Project', destructive=True)
+@_safe
+def update_project(
+    project_id: str = "",
+    name: str = "",
+    code: str = "",
+    description: str = "",
+    status: str = "",
+    client_name: str = "",
+    location: str = "",
+    start_date: str = "",
+    end_date: str = "",
+    clear: str = "",
+) -> str:
+    """Update a project (the active one unless project_id is given). Only the
+    fields you supply are changed; blank arguments are left alone. status is
+    planning/active/on_hold/completed/archived; dates are YYYY-MM-DD. To empty a
+    field, name it in 'clear' (comma separated): description, client_name,
+    location, start_date, end_date. Project settings and permissions stay in the
+    web app's Project Admin. Usually needs project admin rights."""
+    c = client()
+    pid = project_id or require_project()
+    payload = _update_payload(
+        {"name": name, "code": code, "description": description, "status": status,
+         "client_name": client_name, "location": location,
+         "start_date": start_date, "end_date": end_date},
+        clear,
+        {"description": "", "client_name": "", "location": "", "start_date": None, "end_date": None},
+    )
+    if not payload:
+        return "Nothing to update. Supply at least one field to change (or name fields in 'clear')."
+    result = c.patch(f"/api/projects/{pid}/", json=payload)
+    active = c.store.get_active_project()
+    if name and active and active.get("id") == pid:
+        c.store.set_active_project({"id": pid, "name": name})
+    return f"Project {pid} updated.\n\n{_pretty(result)}"
+
+
 @_tool('List Project Members', read_only=True)
 @_safe
 def list_project_members() -> str:
@@ -1110,20 +1184,68 @@ def create_job(
     description: str = "",
     status: str = "",
     assigned_to: str = "",
+    po_number: str = "",
+    wo_number: str = "",
+    priority: str = "",
+    start_date: str = "",
+    due_date: str = "",
 ) -> str:
     """Create a job (work order) in the current project. 'name' and 'code' are
-    required. Optionally set a description, status, and assign it to a project
-    member by their user id."""
+    required. Optionally set a description, status
+    (draft/active/in_progress/review/completed/cancelled), an assignee user id,
+    po_number, wo_number, priority (low/medium/high), and start_date / due_date
+    (YYYY-MM-DD)."""
     pid = require_project()
     payload: dict[str, Any] = {"project": pid, "name": name, "code": code}
-    if description:
-        payload["description"] = description
-    if status:
-        payload["status"] = status
-    if assigned_to:
-        payload["assigned_to"] = assigned_to
+    payload.update(_update_payload(
+        {"description": description, "status": status, "assigned_to": assigned_to,
+         "po_number": po_number, "wo_number": wo_number, "priority": priority,
+         "start_date": start_date, "due_date": due_date},
+        "", {},
+    ))
     result = client().post("/api/jobs/", json=payload)
     return f"Created job '{name}' ({code}).\n\n{_pretty(result)}"
+
+
+@_tool('Update Job', destructive=True)
+@_safe
+def update_job(
+    job_id: str,
+    name: str = "",
+    code: str = "",
+    description: str = "",
+    status: str = "",
+    assigned_to: str = "",
+    po_number: str = "",
+    wo_number: str = "",
+    priority: str = "",
+    start_date: str = "",
+    due_date: str = "",
+    metadata: str = "",
+    clear: str = "",
+) -> str:
+    """Update a job (work order). Only the fields you supply are changed; blank
+    arguments are left alone. status is draft/active/in_progress/review/
+    completed/cancelled, priority is low/medium/high, dates are YYYY-MM-DD.
+    'metadata' is a JSON object merged into the job's existing metadata
+    (supplied keys overwrite, a key set to null is removed, others are kept).
+    To empty a field, name it in 'clear' (comma separated): description,
+    po_number, wo_number, start_date, due_date, assigned_to."""
+    path = f"/api/jobs/{job_id}/"
+    payload = _update_payload(
+        {"name": name, "code": code, "description": description, "status": status,
+         "assigned_to": assigned_to, "po_number": po_number, "wo_number": wo_number,
+         "priority": priority, "start_date": start_date, "due_date": due_date},
+        clear,
+        {"description": "", "po_number": "", "wo_number": "",
+         "start_date": None, "due_date": None, "assigned_to": None},
+    )
+    if metadata:
+        payload["metadata"] = _merged_metadata(path, metadata)
+    if not payload:
+        return "Nothing to update. Supply at least one field to change (or name fields in 'clear')."
+    result = client().patch(f"/api/jobs/{job_id}/", json=payload)
+    return f"Job {job_id} updated.\n\n{_pretty(result)}"
 
 
 # ===========================================================================
@@ -1159,27 +1281,76 @@ def create_package(
     test_medium: str = "",
     line_spec: str = "",
     assigned_to: str = "",
+    status: str = "",
+    metadata: str = "",
+    pcf_north_indicator_on: Optional[bool] = None,
+    pcf_north_axis: str = "",
 ) -> str:
     """Create a test package under a job in the current project. 'job', 'name' and
     'code' are required. Optionally set package_type (hydro_test/pneumatic_test/
     weld_map/nde/turnover/custom), a description, test parameters (test_pressure,
-    test_medium), a governing line_spec id, and an assignee user id."""
+    test_medium), a governing line_spec id, an assignee user id, status
+    (draft/open/in_progress/testing/completed/rejected), metadata (a JSON object),
+    and the PCF isometric north settings: pcf_north_indicator_on and
+    pcf_north_axis (Y/X/Y-decreasing/X-decreasing)."""
     pid = require_project()
     payload: dict[str, Any] = {"project": pid, "job": job, "name": name, "code": code}
-    if package_type:
-        payload["package_type"] = package_type
-    if description:
-        payload["description"] = description
-    if test_pressure:
-        payload["test_pressure"] = test_pressure
-    if test_medium:
-        payload["test_medium"] = test_medium
-    if line_spec:
-        payload["line_spec"] = line_spec
-    if assigned_to:
-        payload["assigned_to"] = assigned_to
+    payload.update(_update_payload(
+        {"package_type": package_type, "description": description,
+         "test_pressure": test_pressure, "test_medium": test_medium,
+         "line_spec": line_spec, "assigned_to": assigned_to, "status": status,
+         "pcf_north_indicator_on": pcf_north_indicator_on, "pcf_north_axis": pcf_north_axis},
+        "", {},
+    ))
+    if metadata:
+        payload["metadata"] = _parse_json_arg("metadata", metadata)
     result = client().post("/api/packages/", json=payload)
     return f"Created package '{name}' ({code}).\n\n{_pretty(result)}"
+
+
+@_tool('Update Package', destructive=True)
+@_safe
+def update_package(
+    package_id: str,
+    name: str = "",
+    code: str = "",
+    description: str = "",
+    package_type: str = "",
+    status: str = "",
+    test_pressure: str = "",
+    test_medium: str = "",
+    line_spec: str = "",
+    assigned_to: str = "",
+    metadata: str = "",
+    pcf_north_indicator_on: Optional[bool] = None,
+    pcf_north_axis: str = "",
+    clear: str = "",
+) -> str:
+    """Update a test package. Only the fields you supply are changed; blank
+    arguments are left alone. status is draft/open/in_progress/testing/
+    completed/rejected; package_type is hydro_test/pneumatic_test/weld_map/nde/
+    turnover/custom; pcf_north_axis is Y/X/Y-decreasing/X-decreasing.
+    'metadata' is a JSON object merged into the package's existing metadata
+    (supplied keys overwrite, a key set to null is removed, others are kept).
+    To empty a field, name it in 'clear' (comma separated): description,
+    test_pressure, test_medium, line_spec, assigned_to, pcf_north_indicator_on,
+    pcf_north_axis."""
+    path = f"/api/packages/{package_id}/"
+    payload = _update_payload(
+        {"name": name, "code": code, "description": description,
+         "package_type": package_type, "status": status, "test_pressure": test_pressure,
+         "test_medium": test_medium, "line_spec": line_spec, "assigned_to": assigned_to,
+         "pcf_north_indicator_on": pcf_north_indicator_on, "pcf_north_axis": pcf_north_axis},
+        clear,
+        {"description": "", "test_pressure": None, "test_medium": "", "line_spec": None,
+         "assigned_to": None, "pcf_north_indicator_on": None, "pcf_north_axis": None},
+    )
+    if metadata:
+        payload["metadata"] = _merged_metadata(path, metadata)
+    if not payload:
+        return "Nothing to update. Supply at least one field to change (or name fields in 'clear')."
+    result = client().patch(f"/api/packages/{package_id}/", json=payload)
+    return f"Package {package_id} updated.\n\n{_pretty(result)}"
 
 
 # ===========================================================================
@@ -1210,6 +1381,24 @@ def create_line_spec(name: str, requirements: str = "", status: str = "") -> str
         payload["status"] = status
     result = client().post("/api/line-specs/", json=payload)
     return f"Created line specification '{name}'.\n\n{_pretty(result)}"
+
+
+@_tool('Update Line Spec', destructive=True)
+@_safe
+def update_line_spec(line_spec_id: str, name: str = "", requirements: str = "",
+                     status: str = "", clear: str = "") -> str:
+    """Update a line specification. Only the fields you supply are changed;
+    blank arguments are left alone. status is active/archived. To empty the
+    requirements text, pass clear='requirements'. Needs project admin rights."""
+    payload = _update_payload(
+        {"name": name, "requirements": requirements, "status": status},
+        clear,
+        {"requirements": ""},
+    )
+    if not payload:
+        return "Nothing to update. Supply at least one field to change (or name fields in 'clear')."
+    result = client().patch(f"/api/line-specs/{line_spec_id}/", json=payload)
+    return f"Line specification {line_spec_id} updated.\n\n{_pretty(result)}"
 
 
 # ===========================================================================
