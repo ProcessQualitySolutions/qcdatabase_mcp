@@ -182,7 +182,7 @@ def _name_of(item: dict[str, Any]) -> str:
     return "(unnamed)"
 
 
-def _render_row(index: int, item: Any) -> str:
+def _render_row(index: int, item: Any, full_keys: frozenset = frozenset()) -> str:
     """Render one list row, passing every field through unmolested.
 
     A short 'name [status]' header keeps the list scannable; beneath it the FULL
@@ -194,19 +194,21 @@ def _render_row(index: int, item: Any) -> str:
     head = _name_of(item)
     if item.get("status"):
         head += f" [{item['status']}]"
-    return f"{index}. {head}\n{_indent(_pretty(item), 3)}"
+    return f"{index}. {head}\n{_indent(_pretty(item, full_keys), 3)}"
 
 
-def _render_list(title: str, items: list[Any], empty: str = "Nothing found.") -> str:
+def _render_list(title: str, items: list[Any], empty: str = "Nothing found.",
+                 full_keys: frozenset = frozenset()) -> str:
     """Render any list of API records, dumping EVERY field of every row (see
     _render_row). This is the default for browse/list tools: QC Database treats data
     transparency as a design goal, so only genuinely specialized tools (summaries,
-    reports, the manual reader) should filter fields instead of calling this."""
+    reports, the manual reader) should filter fields instead of calling this.
+    Fields named in *full_keys* are passed to _pretty untrimmed."""
     if not items:
         return f"{title}\n{empty}"
     lines = [_DATA_FENCE, "", title, f"({len(items)} found)", ""]
     for i, it in enumerate(items, 1):
-        lines.append(_render_row(i, it))
+        lines.append(_render_row(i, it, full_keys))
     return "\n".join(lines)
 
 
@@ -314,13 +316,16 @@ def _is_url(value: str) -> bool:
     return value.startswith(("https://", "http://")) and not any(c.isspace() for c in value)
 
 
-def _pretty(obj: Any) -> str:
-    """Compact, readable JSON for a single resource, with huge blobs trimmed."""
+def _pretty(obj: Any, full_keys: frozenset = frozenset()) -> str:
+    """Compact, readable JSON for a single resource, with huge blobs trimmed.
+
+    Values under a key in *full_keys* are never trimmed: a cut-off schema is
+    as useless as a cut-off link (see list_document_folders)."""
     def trim(value: Any) -> Any:
         if isinstance(value, str) and len(value) > 600 and not _is_url(value):
             return value[:600] + "... (truncated)"
         if isinstance(value, dict):
-            return {k: trim(v) for k, v in value.items()}
+            return {k: v if k in full_keys else trim(v) for k, v in value.items()}
         if isinstance(value, list):
             trimmed = [trim(v) for v in value[:50]]
             if len(value) > 50:
@@ -1115,7 +1120,10 @@ def list_document_folders() -> str:
     folder id when uploading a document so it is filed and extracted correctly."""
     pid = require_project()
     data = client().get_all(f"/api/projects/{pid}/schemas/documents/")
-    return _render_list("Document folders / types:", data)
+    # The schemas are the field definitions a caller builds payloads from, so
+    # they come back whole rather than trimmed at 600 characters.
+    return _render_list("Document folders / types:", data,
+                        full_keys=frozenset({"extraction_schema", "json_schema"}))
 
 
 @_tool('List Form Schemas', read_only=True)
