@@ -1960,6 +1960,9 @@ def create_map_item(
     sheet_number: Optional[int] = None,
     notes: str = "",
     data: str = "",
+    assigned_to: str = "",
+    status: str = "",
+    bim_component_id: str = "",
 ) -> str:
     """Create a map item record (a weld, flange, fitting...) pinned to a drawing.
     Uses an existing schema; never creates or modifies a map-item type definition.
@@ -1993,6 +1996,12 @@ def create_map_item(
     honor whichever form the source provides. flag_rotation is the flag's
     rotation in degrees; sheet_number targets a sheet on a multi-sheet drawing
     (default 1).
+
+    Optionally assign it to a project member (assigned_to, a user id), set a
+    starting status (planned/pending/in_progress/na), and link it to a BIM model
+    element with bim_component_id. 'completed' and 'accepted' are sign-offs, so
+    they are recorded only through 'mark_map_item_complete' /
+    'mark_map_item_accepted', never set here.
 
     Placing from another system's PDF positions: PDF coordinates are in points
     (1/72 inch) with a BOTTOM-left origin and y up. Scale each axis by the
@@ -2028,8 +2037,86 @@ def create_map_item(
         payload["notes"] = notes
     if data:
         payload["data"] = _parse_json_arg("data", data)
+    payload.update(_update_payload(
+        {"assigned_to": assigned_to, "status": _map_item_status(status),
+         "bim_component_id": bim_component_id},
+        "", {},
+    ))
     result = client().post("/api/mapping/items/", json=payload)
     return f"Created map item '{label}'.\n\n{_pretty(result)}"
+
+
+# Statuses an assistant may set directly. 'completed' and 'accepted' are buy-offs
+# recorded under the user's name, so they go only through the mark_* tools.
+_MAP_ITEM_SETTABLE_STATUSES = ("planned", "pending", "in_progress", "na")
+
+
+def _map_item_status(status: str) -> str:
+    st = (status or "").strip().lower()
+    if not st or st in _MAP_ITEM_SETTABLE_STATUSES:
+        return st
+    if st in ("completed", "accepted"):
+        raise ValueError(
+            f"'{st}' is a sign-off: use 'mark_map_item_{'complete' if st == 'completed' else 'accepted'}' "
+            "so it is recorded under your name."
+        )
+    raise ValueError(f"Unknown status '{status}'. Use one of: {', '.join(_MAP_ITEM_SETTABLE_STATUSES)}.")
+
+
+@_tool('Update Map Item', destructive=True)
+@_safe
+def update_map_item(
+    item_id: str,
+    label: str = "",
+    x_position: Optional[float] = None,
+    y_position: Optional[float] = None,
+    x_position_2: Optional[float] = None,
+    y_position_2: Optional[float] = None,
+    flag_rotation: Optional[int] = None,
+    sheet_number: Optional[int] = None,
+    notes: str = "",
+    assigned_to: str = "",
+    status: str = "",
+    bim_component_id: str = "",
+    clear: str = "",
+) -> str:
+    """Update one map item: rename it, move it on its drawing, rotate its flag,
+    change its sheet, edit notes, (re)assign it, set a working status, or link a
+    BIM element. Only the fields you supply are changed; blank arguments are left
+    alone. Discover ids with 'list_map_items' / 'get_map_item'.
+
+    Coordinates are drawing pixels from the top-left origin (see
+    'create_map_item'). For a two-point item, supply both endpoint pairs when
+    moving the whole item. status may be planned/pending/in_progress/na;
+    'completed' and 'accepted' are sign-offs and go only through
+    'mark_map_item_complete' / 'mark_map_item_accepted'.
+
+    To empty a field, name it in 'clear' (comma separated): notes, assigned_to,
+    flag_rotation, bim_component_id, or x_position_2,y_position_2 together (which
+    turns an extent item back into a single point).
+
+    The API can also move an item to another drawing or change its schema
+    (type); this tool deliberately doesn't, because re-typing or re-homing an
+    item can strand its data and sign-offs - do that in the web app. To edit the
+    item's schema data fields, use 'bulk_update_map_items' (it merges keys).
+    Confirm changes to signed-off items with the user and check the returned
+    status."""
+    payload = _update_payload(
+        {"label": label, "x_position": x_position, "y_position": y_position,
+         "x_position_2": x_position_2, "y_position_2": y_position_2,
+         "flag_rotation": flag_rotation, "sheet_number": sheet_number, "notes": notes,
+         "assigned_to": assigned_to, "status": _map_item_status(status),
+         "bim_component_id": bim_component_id},
+        clear,
+        {"notes": "", "assigned_to": None, "flag_rotation": None, "bim_component_id": None,
+         "x_position_2": None, "y_position_2": None},
+    )
+    if ("x_position_2" in payload) != ("y_position_2" in payload):
+        raise ValueError("Give (or clear) x_position_2 and y_position_2 together.")
+    if not payload:
+        return "Nothing to update. Supply at least one field to change (or name fields in 'clear')."
+    result = client().patch(f"/api/mapping/items/{item_id}/", json=payload)
+    return f"Map item {item_id} updated.\n\n{_pretty(result)}"
 
 
 @_tool('Bulk Create Map Items')
@@ -2098,7 +2185,7 @@ def bulk_update_map_items(drawing_id: str, schema_id: str, items: str) -> str:
 
     This edits ONLY schema data fields. It cannot move (x_position/y_position/
     flag_rotation), rename (label), change status, or reassign an item - supplying
-    any of those keys is rejected. Per item the supplied 'data' keys are MERGED
+    any of those keys is rejected; use 'update_map_item' for those. Per item the supplied 'data' keys are MERGED
     into the item's existing data (given keys overwrite, omitted keys are left
     unchanged). For fields backed by a controlled list, use that list item's
     'pseudo_code' pill (from 'list_list_items') as the value.

@@ -206,7 +206,8 @@ Then ask Claude to **"connect to QC Database"** to sign in — see below.
   `download_fillable_template`, `submit_fillable_template`
 - **Structured data:** `get_document`, `set_document_extracted_data`,
   `list_documents`, `list_map_items`, `get_map_item`, `create_map_item`
-  (place welds/flanges by pixel coordinates), `bulk_create_map_items`,
+  (place welds/flanges by pixel coordinates), `update_map_item` (rename, move,
+  notes, assignee, working status), `bulk_create_map_items`,
   `bulk_update_map_items` (batch up to 500 items on one drawing/schema). **Always
   call `list_map_item_schemas` first** — see the CAD/PCF/.weldb note below
 - **Zipmaps (a whole mapped drawing in one upload):** `inspect_zipmap`,
