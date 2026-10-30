@@ -1416,18 +1416,49 @@ def update_line_spec(line_spec_id: str, name: str = "", requirements: str = "",
 # ===========================================================================
 @_tool('List Documents', read_only=True)
 @_safe
-def list_documents(folder_id: str = "", status: str = "", search: str = "") -> str:
-    """List uploaded documents in the current project. Optionally filter by a
-    document folder id, status (uploading/processing/extracting/ready/error), or
-    a search term."""
+def list_documents(
+    folder_id: str = "",
+    status: str = "",
+    search: str = "",
+    job: str = "",
+    package: str = "",
+    tags: str = "",
+    metadata: str = "",
+) -> str:
+    """List uploaded documents in the current project. Deleted (archived)
+    documents are not listed; see 'list_deleted_documents'. All filters are
+    optional and combine (AND):
+
+    - folder_id: a document folder id; status: uploading/processing/extracting/
+      ready/error; search: matches title or file name.
+    - job / package: a job id or package id the document is assigned to.
+    - tags: comma-separated tags; a document must carry every one.
+    - metadata: a JSON object of top-level metadata keys and exact values, e.g.
+      {"heat_number": "4471"}. Keys are letters, digits and underscores (up to
+      64 characters); nested keys and partial matches are not supported."""
     pid = require_project()
-    data = client().get_all(
-        "/api/documents/",
-        project=pid,
-        folder=folder_id or None,
-        status=status or None,
-        search=search or None,
-    )
+    params: dict[str, Any] = {
+        "project": pid,
+        "folder": folder_id or None,
+        "status": status or None,
+        "search": search or None,
+        "job": job or None,
+        "package": package or None,
+    }
+    tag_list = [t.strip() for t in (tags or "").split(",") if t.strip()]
+    if tag_list:
+        params["tag"] = tag_list
+    if metadata:
+        filters = _parse_json_arg("metadata", metadata)
+        if not isinstance(filters, dict):
+            raise ValueError("'metadata' must be a JSON object, e.g. {\"heat_number\": \"4471\"}.")
+        for key, value in filters.items():
+            if isinstance(value, (dict, list)):
+                raise ValueError(f"metadata '{key}': only text, number or true/false values can be matched.")
+            # Query strings are text; the API also matches the JSON number /
+            # boolean / null the text stands for.
+            params[f"metadata__{key}"] = json.dumps(value) if not isinstance(value, str) else value
+    data = client().get_all("/api/documents/", **params)
     return _render_list("Documents:", data)
 
 
@@ -1506,7 +1537,9 @@ def upload_document_version(document_id: str, file_path: str, do_not_extract: bo
 @_tool('Download Document', structured_output=False)
 @_safe
 def download_document(document_id: str, save_path: str = "", as_link: bool = False) -> Any:
-    """Download a document's original uploaded file.
+    """Download (export) a document's original uploaded file. This is the
+    document export: it uses the API's download endpoint and falls back to its
+    /export/ endpoint for files too large for the download envelope.
 
     On the local (stdio) server it is written to 'save_path' on your disk. On the
     hosted server it is returned to you inline over the MCP connection (save it
@@ -1526,14 +1559,134 @@ def download_document(document_id: str, save_path: str = "", as_link: bool = Fal
     )
 
 
+def _document_ids_arg(raw: Any) -> list[str]:
+    """Comma-separated (or JSON array) document ids, de-duplicated in order."""
+    if isinstance(raw, list):
+        parts = [str(p).strip() for p in raw]
+    else:
+        text = (raw or "").strip()
+        parts = _parse_json_arg("document_ids", text) if text.startswith("[") else text.split(",")
+        parts = [str(p).strip() for p in parts]
+    ids = list(dict.fromkeys(p for p in parts if p))
+    if not ids:
+        raise ValueError("Supply at least one document id.")
+    if len(ids) > 200:
+        raise ValueError("At most 200 documents can be changed in one call.")
+    return ids
+
+
+@_tool('Delete Document', destructive=True)
+@_safe
+def delete_document(document_id: str) -> str:
+    """Delete (archive) one document. This is a SOFT delete: the document
+    leaves lists and lookups, but its file, versions, extracted data, history
+    and references are kept, and 'restore_document' brings it back. Confirm with
+    the user first.
+
+    Do not use this to replace a file with a newer revision; use
+    'upload_document_version'. Needs project membership; a Viewer / Field member
+    also needs the Delete permission on the document's folder."""
+    client().delete(f"/api/documents/{document_id}/")
+    return (
+        f"Document {document_id} deleted (archived: hidden from lists, kept on record; "
+        "'restore_document' brings it back)."
+    )
+
+
+@_tool('Bulk Delete Documents', destructive=True)
+@_safe
+def bulk_delete_documents(document_ids: str) -> str:
+    """Delete (archive) up to 200 documents of the current project in one call.
+    'document_ids' is a comma-separated list (or JSON array) of document ids.
+    All or nothing: if any id is not a live document in this project, or you
+    may not delete one of them, none are deleted.
+
+    This is a SOFT delete, like 'delete_document': files, versions, extracted
+    data, history and references are kept, and 'bulk_restore_documents' brings
+    them back. Confirm the list with the user first. Needs project membership;
+    a Viewer / Field member also needs the Delete permission on every document's
+    folder."""
+    pid = require_project()
+    ids = _document_ids_arg(document_ids)
+    result = client().post("/api/documents/bulk-delete/", json={"project": pid, "ids": ids})
+    count = result.get("deleted", len(ids)) if isinstance(result, dict) else len(ids)
+    return f"Deleted (archived) {count} document(s). They can be restored with 'bulk_restore_documents'."
+
+
+@_tool('List Deleted Documents', read_only=True)
+@_safe
+def list_deleted_documents() -> str:
+    """List the deleted (archived) documents of the current project, most
+    recently deleted first, with who deleted them and when. Use it to find the
+    ids for 'restore_document' / 'bulk_restore_documents'."""
+    pid = require_project()
+    data = client().get_all("/api/documents/trash/", project=pid)
+    return _render_list("Deleted documents:", data, empty="No deleted documents.")
+
+
+@_tool('Restore Document', idempotent=True)
+@_safe
+def restore_document(document_id: str) -> str:
+    """Restore one deleted (archived) document to its original project and
+    folder, with its file, versions and extracted data. Needs project
+    membership; a Viewer / Field member also needs the Delete permission on the
+    document's folder (restoring undoes a delete)."""
+    result = client().post(f"/api/documents/{document_id}/restore/")
+    return f"Document {document_id} restored.\n\n{_pretty(result)}"
+
+
+@_tool('Bulk Restore Documents', idempotent=True)
+@_safe
+def bulk_restore_documents(document_ids: str) -> str:
+    """Restore up to 200 deleted (archived) documents of the current project in
+    one call. 'document_ids' is a comma-separated list (or JSON array) of ids
+    from 'list_deleted_documents'. All or nothing: if any id is not a deleted
+    document in this project, none are restored. Needs project membership; a
+    Viewer / Field member also needs the Delete permission on every document's
+    folder."""
+    pid = require_project()
+    ids = _document_ids_arg(document_ids)
+    result = client().post("/api/documents/bulk-restore/", json={"project": pid, "ids": ids})
+    count = result.get("restored", len(ids)) if isinstance(result, dict) else len(ids)
+    return f"Restored {count} document(s)."
+
+
+@_tool('Get Document History', read_only=True)
+@_safe
+def get_document_history(document_id: str, page: int = 1, page_size: int = 25) -> str:
+    """Get a document's change history, newest first: each entry has the
+    action, source (web, API, AI...), who made it, when, and changed_fields (a
+    diff against the previous entry); 'snapshot' holds the full record state
+    after that change. Pages hold up to 200 entries ('page_size', default 25);
+    'count' and 'next' tell you whether there are more pages. Read only."""
+    page_size = max(1, min(int(page_size or 25), 200))
+    result = client().get(
+        f"/api/documents/{document_id}/history/", page=max(1, int(page or 1)), page_size=page_size
+    )
+    return _pretty(result)
+
+
 # ===========================================================================
 # Drawings
 # ===========================================================================
 @_tool('List Drawings', read_only=True)
 @_safe
-def list_drawings(drawing_type: str = "", status: str = "", search: str = "") -> str:
+def list_drawings(
+    drawing_type: str = "",
+    status: str = "",
+    search: str = "",
+    job: str = "",
+    package: str = "",
+    updated_since: str = "",
+) -> str:
     """List the drawings in the current project (use a drawing's id when creating
-    map items on it). Optionally filter by drawing_type, status, or a search term.
+    map items on it). Optionally filter by drawing_type, status, a search term
+    (title, drawing number or line number), a job id, a package id, or
+    'updated_since': an ISO 8601 date-time such as 2026-10-01T00:00:00Z that
+    returns only drawings written at or after it (any write counts, including
+    extraction, rescans, revisions and file swaps). With updated_since the list
+    is oldest-change first, so the last row's updated_at is the value to use
+    for the next check. Filters combine (AND).
     Removed drawings are soft-deleted, so they do not appear here (nor do their map
     items) even though the records are retained."""
     pid = require_project()
@@ -1543,6 +1696,10 @@ def list_drawings(drawing_type: str = "", status: str = "", search: str = "") ->
         drawing_type=drawing_type or None,
         status=status or None,
         search=search or None,
+        job=job or None,
+        package=package or None,
+        updated_since=updated_since or None,
+        ordering="updated_at" if updated_since else None,
     )
     return _render_list("Drawings:", data)
 
@@ -3376,28 +3533,300 @@ def turnover_report() -> str:
 
 
 # ===========================================================================
-# Shippers (received material - read only)
+# Shippers (shipments and their line items)
 # ===========================================================================
+# A shipper is a shipment header (type, date, send / receive locations) with
+# line items: drawings (spools) or loose non-drawing goods. It is editable only
+# while its status is draft. Any other status locks it, and the API answers 409
+# (shipper_locked) to further edits. Unlocking (back to draft), receiving line
+# items and checklist confirmations are web-app only; the API has no endpoint
+# for them. Writes need the shippers:write scope and the same project write
+# rule as the web app.
 @_tool('List Shippers', read_only=True)
 @_safe
-def list_shippers(search: str = "") -> str:
-    """List the shippers (incoming shipments / receiving records) in the current
-    project. Optionally filter by a search term."""
+def list_shippers(search: str = "", drawing_id: str = "", external_ref: str = "") -> str:
+    """List the shippers (shipments) in the current project, newest first.
+    Optionally narrow to the shippers a drawing (spool) is on with 'drawing_id',
+    or to the one carrying your own 'external_ref'. 'search' is passed through,
+    but the shippers list has no text search on the API side, so it does not
+    narrow the list; use 'semantic_search' (item_type='shippers') to find
+    shippers by meaning."""
     pid = require_project()
-    data = client().get_all(f"/api/shippers/projects/{pid}/", search=search or None)
+    data = client().get_all(
+        f"/api/shippers/projects/{pid}/", search=search or None, drawing=drawing_id or None,
+        external_ref=external_ref or None,
+    )
     return _render_list("Shippers:", data)
+
+
+@_tool('Get Shipper', read_only=True)
+@_safe
+def get_shipper(shipper_id: str) -> str:
+    """Get one shipper: its status and lock state, type, locations, notes,
+    available_statuses (the values 'set_shipper_status' accepts), checklist
+    state and line_item_count. Use 'list_shipper_line_items' for its lines."""
+    pid = require_project()
+    return _pretty(client().get(f"/api/shippers/projects/{pid}/{shipper_id}/"))
 
 
 @_tool('List Shipper Line Items', read_only=True)
 @_safe
 def list_shipper_line_items(shipper_id: str, search: str = "") -> str:
-    """List the line items (received materials, with quantities and heat numbers)
-    on one shipper. Optionally filter by a search term."""
+    """List the line items on one shipper: the drawing data frozen when each
+    line was added (drawing number, revision, package, BOM rows, map items),
+    loose-item descriptions and quantities, and whether each line was received.
+    'search' is passed through, but this list has no text search on the API
+    side, so it does not narrow the list."""
     pid = require_project()
     data = client().get_all(
         f"/api/shippers/projects/{pid}/{shipper_id}/line-items/", search=search or None
     )
     return _render_list(f"Line items on shipper {shipper_id}:", data)
+
+
+@_tool('List Shipper Types', read_only=True)
+@_safe
+def list_shipper_types() -> str:
+    """List the shipper types configured for the current project. A type
+    supplies a new shipper's default send / receive locations and notes, its
+    checklists, and its allowed statuses ('statuses'). Use a type's id with
+    'create_shipper'. Types are managed in the web app's Project Admin."""
+    pid = require_project()
+    return _render_list("Shipper types:", client().get_all(f"/api/shippers/projects/{pid}/types/"))
+
+
+@_tool('List Shipper Locations', read_only=True)
+@_safe
+def list_shipper_locations() -> str:
+    """List the shipper locations (shops, sites, yards) configured for the
+    current project. Use a location's id for a shipper's send_location /
+    receive_location. Locations are managed in the web app's Project Admin."""
+    pid = require_project()
+    return _render_list("Shipper locations:", client().get_all(f"/api/shippers/projects/{pid}/locations/"))
+
+
+def _shipper_line_items_arg(raw: str) -> list[Any]:
+    items = _parse_json_arg("line_items", raw)
+    if isinstance(items, dict):
+        items = [items]
+    if not isinstance(items, list) or not items or not all(isinstance(i, dict) for i in items):
+        raise ValueError(
+            "'line_items' must be a JSON object or a non-empty array of objects, e.g. "
+            '[{"drawing": "<drawing id>"}, {"line_item_type": "non_drawing_item", '
+            '"item_description": "Gasket kit", "quantity": 4}].'
+        )
+    return items
+
+
+@_tool('Create Shipper')
+@_safe
+def create_shipper(
+    shipper_type: str,
+    title: str = "",
+    shipment_date: str = "",
+    send_location: str = "",
+    receive_location: str = "",
+    notes: str = "",
+    external_ref: str = "",
+    line_items: str = "",
+) -> str:
+    """Create a draft shipper (shipment) in the current project.
+
+    'shipper_type' is required, as in the web app: call 'list_shipper_types'
+    for the ids. The type fills in send_location, receive_location and notes
+    when you leave them blank. 'title' defaults to today's date (YYYY-MM-DD)
+    and 'shipment_date' (YYYY-MM-DD) to today. Locations are ids from
+    'list_shipper_locations'. 'external_ref' is your own id for the shipper,
+    unique among the project's shippers.
+
+    'line_items' optionally adds lines in the same call, as a JSON object or
+    array (same shape as 'add_shipper_line_items'); if any line is invalid,
+    nothing is created, not even the shipper.
+
+    The shipper is created as draft, so it stays editable; use
+    'set_shipper_status' to move it on (which locks it). Needs write access to
+    the project: Project Admins, Managers and Inspectors have it; a Viewer /
+    Field member only if their user type has the Shippers Create permission
+    (plus Shippers Edit when 'line_items' is given)."""
+    payload: dict[str, Any] = {"shipper_type": shipper_type}
+    payload.update(_update_payload(
+        {"title": title, "shipment_date": shipment_date, "send_location": send_location,
+         "receive_location": receive_location, "notes": notes, "external_ref": external_ref},
+        "", {},
+    ))
+    if line_items:
+        payload["line_items"] = _shipper_line_items_arg(line_items)
+    pid = require_project()
+    result = client().post(f"/api/shippers/projects/{pid}/", json=payload)
+    return f"Created shipper.\n\n{_pretty(result)}"
+
+
+@_tool('Update Shipper', destructive=True)
+@_safe
+def update_shipper(
+    shipper_id: str,
+    title: str = "",
+    shipment_date: str = "",
+    shipper_type: str = "",
+    send_location: str = "",
+    receive_location: str = "",
+    notes: str = "",
+    external_ref: str = "",
+    clear: str = "",
+) -> str:
+    """Update a draft shipper's header. Only the fields you supply are changed;
+    blank arguments are left alone. shipment_date is YYYY-MM-DD; shipper_type
+    and the locations are ids from 'list_shipper_types' / 'list_shipper_locations'.
+    Changing the type does not re-apply its default locations or notes. To empty
+    a field, name it in 'clear' (comma separated): send_location,
+    receive_location, notes, external_ref.
+
+    A locked shipper (any status other than draft) cannot be edited: the API
+    answers 409 shipper_locked, and unlocking it is done in the web app. Use
+    'set_shipper_status' to change the status. Needs write access to the
+    project: Project Admins, Managers and Inspectors have it; a Viewer / Field
+    member only if their user type has the Shippers Edit permission."""
+    payload = _update_payload(
+        {"title": title, "shipment_date": shipment_date, "shipper_type": shipper_type,
+         "send_location": send_location, "receive_location": receive_location,
+         "notes": notes, "external_ref": external_ref},
+        clear,
+        {"send_location": None, "receive_location": None, "notes": "", "external_ref": None},
+    )
+    if not payload:
+        return "Nothing to update. Supply at least one field to change (or name fields in 'clear')."
+    pid = require_project()
+    result = client().patch(f"/api/shippers/projects/{pid}/{shipper_id}/", json=payload)
+    return f"Shipper {shipper_id} updated.\n\n{_pretty(result)}"
+
+
+@_tool('Set Shipper Status', destructive=True, idempotent=True)
+@_safe
+def set_shipper_status(shipper_id: str, status: str) -> str:
+    """Move a shipper to another status, e.g. 'shipped'. The status must be one
+    of the shipper's available_statuses (see 'get_shipper'; they come from its
+    type, or draft / shipped / received when it has none).
+
+    Any status other than draft LOCKS the shipper: its header and line items can
+    no longer be edited or removed. A locked shipper can still move between
+    non-draft statuses. Moving back to draft unlocks it, and that is done in the
+    web app only, so this tool refuses 'draft'. Setting 'received' only changes
+    the status; receiving individual line items and the checklists are done in
+    the web app. Confirm with the user before locking a shipper. Needs write
+    access to the project: Project Admins, Managers and Inspectors have it; a
+    Viewer / Field member only if their user type has the Shippers Edit
+    permission."""
+    status = (status or "").strip()
+    if not status:
+        raise ValueError("Supply a status. 'get_shipper' lists the shipper's available_statuses.")
+    if status == "draft":
+        raise ValueError(
+            "Moving a shipper back to draft unlocks it, which is done in the QC Database "
+            "web app (the API does not allow it)."
+        )
+    pid = require_project()
+    result = client().patch(f"/api/shippers/projects/{pid}/{shipper_id}/", json={"status": status})
+    return f"Shipper {shipper_id} status set to '{status}' (locked).\n\n{_pretty(result)}"
+
+
+@_tool('Delete Shipper', destructive=True)
+@_safe
+def delete_shipper(shipper_id: str) -> str:
+    """Delete a shipper and its line items. Project admins only, as in the web
+    app (other members get a 403).
+
+    This is a SOFT delete: the shipper and its lines stop appearing, but the
+    records are kept with who deleted them and when. The API refuses (409) a
+    locked shipper (any status other than draft) and a shipper with any received
+    line item. Confirm with the user first."""
+    pid = require_project()
+    client().delete(f"/api/shippers/projects/{pid}/{shipper_id}/")
+    return (
+        f"Shipper {shipper_id} deleted (soft-deleted with its line items: hidden, kept "
+        "on record with who deleted it)."
+    )
+
+
+@_tool('Add Shipper Line Items')
+@_safe
+def add_shipper_line_items(shipper_id: str, line_items: str) -> str:
+    """Add one or more line items to a draft shipper. 'line_items' is a JSON
+    object or array of objects; the lines are added after any existing ones and
+    are all-or-nothing (if one is invalid, none are added).
+
+    Each line item is an object. line_item_type is complete (the default),
+    partial_spools_only, partial_no_hardware, partial_bom, partial_map_items or
+    non_drawing_item. Every type except non_drawing_item needs 'drawing' (a
+    drawing id in this project). partial_bom also takes 'bom_indexes'
+    (zero-based rows of the drawing's extracted bill of materials);
+    partial_map_items takes 'map_items' (ids of map items on that drawing);
+    non_drawing_item takes 'item_description' (required) and 'quantity'
+    (defaults to 1). 'sort_order' is optional. Do not send drawing details: the
+    server freezes the drawing number, revision, package, spec, BOM rows and map
+    items itself. Example:
+    [{"drawing": "<drawing id>"},
+     {"line_item_type": "non_drawing_item", "item_description": "Gasket kit", "quantity": 4}]
+
+    A locked shipper answers 409 shipper_locked. Needs write access to the
+    project: Project Admins, Managers and Inspectors have it; a Viewer / Field
+    member only if their user type has the Shippers Edit permission."""
+    items = _shipper_line_items_arg(line_items)
+    pid = require_project()
+    result = client().post(f"/api/shippers/projects/{pid}/{shipper_id}/line-items/", json=items)
+    rows = result if isinstance(result, list) else [result]
+    return _render_list(f"Added {len(rows)} line item(s) to shipper {shipper_id}:", rows)
+
+
+@_tool('Update Shipper Line Item', destructive=True)
+@_safe
+def update_shipper_line_item(
+    shipper_id: str,
+    item_id: str,
+    item_description: str = "",
+    quantity: Optional[int] = None,
+    sort_order: Optional[int] = None,
+    clear: str = "",
+) -> str:
+    """Update a line item on a draft shipper. Only item_description, quantity
+    (a positive whole number) and sort_order can change, and only the ones you
+    supply are sent; the frozen drawing data is never editable. To empty a
+    field, name it in 'clear': item_description or quantity (a non-drawing
+    item needs a description, and its quantity falls back to 1).
+
+    The API answers 409 shipper_locked when the shipper is locked and
+    line_item_received when the line was already received. Needs write access to
+    the project: Project Admins, Managers and Inspectors have it; a Viewer /
+    Field member only if their user type has the Shippers Edit permission."""
+    payload = _update_payload(
+        {"item_description": item_description, "quantity": quantity, "sort_order": sort_order},
+        clear,
+        {"item_description": "", "quantity": None},
+    )
+    if not payload:
+        return "Nothing to update. Supply item_description, quantity or sort_order (or name fields in 'clear')."
+    pid = require_project()
+    result = client().patch(
+        f"/api/shippers/projects/{pid}/{shipper_id}/line-items/{item_id}/", json=payload
+    )
+    return f"Line item {item_id} updated.\n\n{_pretty(result)}"
+
+
+@_tool('Remove Shipper Line Item', destructive=True)
+@_safe
+def remove_shipper_line_item(shipper_id: str, item_id: str) -> str:
+    """Remove a line item from a draft shipper. This is a SOFT delete: the line
+    stops appearing but is kept on record with who removed it and when.
+
+    The API answers 409 shipper_locked when the shipper is locked and
+    line_item_received when the line was already received. Needs write access to
+    the project: Project Admins, Managers and Inspectors have it; a Viewer /
+    Field member only if their user type has the Shippers Edit permission."""
+    pid = require_project()
+    client().delete(f"/api/shippers/projects/{pid}/{shipper_id}/line-items/{item_id}/")
+    return (
+        f"Line item {item_id} removed from shipper {shipper_id} (soft-deleted: hidden, "
+        "kept on record)."
+    )
 
 
 # ===========================================================================

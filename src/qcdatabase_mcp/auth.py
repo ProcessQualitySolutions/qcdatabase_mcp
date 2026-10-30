@@ -31,8 +31,9 @@ from . import BASE_URL
 from .config import SessionChangedError, Store
 
 # The everyday-user scope set: read everywhere, plus write where a daily-driver
-# actually needs it. Shippers / tenants are read-only by design; lists are
-# writable so an agent can seed a project's Welders / WPS / Heat Numbers lists.
+# actually needs it. Tenants are read-only by design; lists are writable so an
+# agent can seed a project's Welders / WPS / Heat Numbers lists, and shippers so
+# an agent can build draft shipments (receiving stays in the web app).
 # This is the permanent ceiling for the registered client, so it stays as narrow
 # as the "do real turnover work" goal allows. Changing it makes existing installs
 # re-register once (see _register_client), after which users run 'login' again.
@@ -51,7 +52,7 @@ DEFAULT_SCOPES = (
     "linespecs:read linespecs:write "
     "locks:read locks:write "
     "lists:read lists:write "
-    "shippers:read "
+    "shippers:read shippers:write "
     "trainings:read trainings:write "
     "forum:read forum:write "
     "qr:read qr:write "
