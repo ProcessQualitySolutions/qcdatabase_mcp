@@ -97,13 +97,18 @@ class CorsMiddleware:
         await self.app(scope, receive, cors_send)
 
 
+# A 401 for a request that sent no token: no ``error`` code (RFC 6750 3.1).
+_NO_TOKEN_BODY = b'{"error_description": "Authentication required"}'
+
+
 class VerificationErrorMiddleware:
     """Catch verifier failures outside Starlette's authentication middleware.
 
     Also adds ``scope="..."`` to the SDK's 401 ``WWW-Authenticate`` challenge
     (RFC 6750 section 3) so MCP clients that read the challenge, not just the
     protected-resource document, request the advertised scopes, and drops
-    ``error="invalid_token"`` when no token was sent.
+    ``error="invalid_token"`` when no token was sent, from the challenge and
+    from the SDK's JSON body (RFC 6750 section 3.1).
     """
 
     def __init__(self, app, scopes=None):
@@ -114,18 +119,29 @@ class VerificationErrorMiddleware:
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
 
+        no_token_401 = False
+
         async def observed_send(message):
+            nonlocal no_token_401
             if message["type"] == "http.response.start" and message["status"] == 401:
                 headers = dict(scope.get("headers", []))
                 bearer = headers.get(b"authorization", b"").lower().startswith(b"bearer ")
                 _log.info("mcp_auth outcome=unauthorized bearer_present=%s", bearer)
+                no_token_401 = not bearer
                 message = dict(message, headers=[
                     (name, _rewrite_challenge(value, self.scope_value, bearer))
                     if name.lower() == b"www-authenticate"
                     and value.lower().startswith(b"bearer")
+                    else (name, str(len(_NO_TOKEN_BODY)).encode())
+                    if no_token_401 and name.lower() == b"content-length"
                     else (name, value)
                     for name, value in message.get("headers", [])
                 ])
+            elif message["type"] == "http.response.body" and no_token_401:
+                # Swallow the SDK's invalid_token body; send ours once it ends.
+                if message.get("more_body", False):
+                    return
+                message = dict(message, body=_NO_TOKEN_BODY)
             await send(message)
 
         try:
