@@ -118,7 +118,7 @@ references:read references:write
 photos:read photos:write
 linespecs:read linespecs:write
 lists:read
-shippers:read
+shippers:read shippers:write
 trainings:read trainings:write
 forum:read forum:write
 manual:read
@@ -213,7 +213,10 @@ complete.
 - **Line specifications:** `/api/line-specs/…`.
 - **Documents:** `/api/documents/…` — upload (optionally filed to a folder whose
   schema drives extraction), read extracted data, upload new versions, download the
-  original, and set extracted data. Fillable-PDF templates live under
+  original, set extracted data, read a document's change history (`{id}/history/`),
+  and delete / restore documents (`DELETE {id}/`, `bulk-delete/`, `trash/`,
+  `{id}/restore/`, `bulk-restore/`; deletes are **soft** archives). The list
+  filters by folder, status, job, package, `tag` and `metadata__<key>`. Fillable-PDF templates live under
   `/api/documents/projects/{project_id}/fillable-templates/…`.
 - **Drawings:** `/api/drawings/…` — isometric and large-format uploads, versions,
   rendered exports (clean, map-overlay, or flagged variants), and rendered **canvas
@@ -269,8 +272,13 @@ complete.
   requests (the "still needs proof" punch list) and references (links from a source
   item to its proof document/form). Creating a matching reference fulfils an open
   request. This is the heart of assembling a complete, traceable turnover package.
-- **Shippers (receiving):** `/api/shippers/projects/{project_id}/…` — incoming
-  material records and their line items (read-only).
+- **Shippers:** `/api/shippers/projects/{project_id}/…` — shipments and their
+  line items, plus the project's shipper types and locations. Create a draft
+  shipper, edit its header, add / update / remove line items (a **soft** delete),
+  and set a status; any status other than draft locks the shipper (`409
+  shipper_locked` on later edits). Unlocking back to draft, receiving line items
+  and checklist confirmations stay in the web app. Deleting a shipper (soft) is
+  for project admins only.
 - **Community forum:** `/api/forum/…` — boards, posts (filter by board, search,
   `is_question`) and threaded replies, with an optional image on a post or reply.
   The forum is **cross-tenant**: every QC Database user at every company can read

@@ -323,7 +323,7 @@ _HOME_TEMPLATE = """<!DOCTYPE html>
             </div>
             <div class="card">
               <div class="cap-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg></div>
-              <h3>Documents &amp; Records</h3><p>Upload, version, and download MTRs, NDE reports, and certificates, and read their AI-extracted fields.</p>
+              <h3>Documents &amp; Records</h3><p>Upload, version, download, archive, and restore MTRs, NDE reports, and certificates, read their AI-extracted fields and change history, and filter by job, package, tag, or metadata.</p>
             </div>
             <div class="card">
               <div class="cap-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="m9 14 2 2 4-4"/></svg></div>
@@ -347,7 +347,7 @@ _HOME_TEMPLATE = """<!DOCTYPE html>
             </div>
             <div class="card">
               <div class="cap-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 18V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v11a1 1 0 0 0 1 1h2"/><path d="M15 18H9"/><path d="M19 18h2a1 1 0 0 0 1-1v-3.65a1 1 0 0 0-.22-.62l-3.48-4.35A1 1 0 0 0 17.52 8H14"/><circle cx="17" cy="18" r="2"/><circle cx="7" cy="18" r="2"/></svg></div>
-              <h3>Receiving &amp; Materials</h3><p>Browse incoming shipments and received line items, with quantities and heat numbers for material traceability.</p>
+              <h3>Receiving &amp; Materials</h3><p>Browse and build shipments: add spools and loose items, then set their status. Receiving and checklists stay in the web app.</p>
             </div>
             <div class="card">
               <div class="cap-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg></div>

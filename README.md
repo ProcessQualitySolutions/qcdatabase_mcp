@@ -197,15 +197,21 @@ Then ask Claude to **"connect to QC Database"** to sign in — see below.
   `download_document`, `upload_drawing`, `upload_large_format_drawing`,
   `upload_drawing_to_package`, `upload_drawing_version`,
   `upload_large_format_drawing_version`, `attach_photo`
-- **Drawings:** `list_drawings`, `get_drawing` (incl. pixel width/height — the
+- **Drawings:** `list_drawings` (filter by type, status, job, package, or
+  `updated_since` to see only drawings changed since a date-time), `get_drawing` (incl. pixel width/height — the
   HTML5-canvas coordinate space for map items), `export_drawing`,
   `export_large_format_drawing`, `update_drawing` (identifying metadata),
   `move_drawing_to_package` (existing drawing and destination in the active
   project; only changes package assignment, without uploading or duplicating)
 - **Fillable PDF forms:** `list_fillable_templates`, `get_fillable_template`,
   `download_fillable_template`, `submit_fillable_template`
+- **Documents:** `list_documents` (filter by folder, status, job, package,
+  tags and metadata values), `get_document_history`, `delete_document`,
+  `bulk_delete_documents`, `list_deleted_documents`, `restore_document`,
+  `bulk_restore_documents` (deletes are soft: the document is archived and can be
+  restored). `download_document` is the document export
 - **Structured data:** `get_document`, `set_document_extracted_data`,
-  `list_documents`, `list_map_items`, `get_map_item`, `create_map_item`
+  `list_map_items`, `get_map_item`, `create_map_item`
   (place welds/flanges by pixel coordinates), `update_map_item` (rename, move,
   notes, assignee, working status), `bulk_create_map_items`,
   `bulk_update_map_items` (batch up to 500 items on one drawing/schema). **Always
@@ -235,7 +241,14 @@ Then ask Claude to **"connect to QC Database"** to sign in — see below.
 - **Turnover (the important part):** `list_reference_requests`,
   `create_reference_request`, `list_references`, `create_reference`,
   `turnover_report`
-- **Receiving:** `list_shippers`, `list_shipper_line_items`
+- **Shippers:** `list_shippers`, `get_shipper`, `list_shipper_line_items`,
+  `list_shipper_types`, `list_shipper_locations`, `create_shipper`,
+  `update_shipper`, `set_shipper_status`, `add_shipper_line_items`,
+  `update_shipper_line_item`, `remove_shipper_line_item` (a soft delete),
+  `delete_shipper` (project admins only; a soft delete). Any status other than
+  draft locks a shipper; unlocking, receiving and checklists stay in the web app.
+  Needs the `shippers:write` scope: connections approved before it was added must
+  reconnect (stdio: run `login` again) to get it
 - **Semantic search (meaning-based, ranked):** `semantic_search` — natural-language
   search across the project's documents, drawings, large-format drawings, jobs,
   packages, list items, map items, form submissions, notes, and shippers

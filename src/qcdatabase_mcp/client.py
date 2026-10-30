@@ -12,7 +12,7 @@ import os
 import re
 import sys
 from typing import Any, BinaryIO
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
 
@@ -405,7 +405,12 @@ class QCClient:
                 nxt = payload.get("next")
                 if not nxt:
                     return results
-                next_params = dict(parse_qsl(urlsplit(str(nxt)).query))
+                # Keep repeated parameters (e.g. ?tag=a&tag=b) as lists so
+                # later pages are filtered exactly like the first one.
+                next_params = {
+                    k: v[0] if len(v) == 1 else v
+                    for k, v in parse_qs(urlsplit(str(nxt)).query).items()
+                }
                 if not next_params:
                     return results  # malformed 'next' - stop rather than loop
                 continue
