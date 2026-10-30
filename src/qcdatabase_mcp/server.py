@@ -3116,8 +3116,9 @@ def unlock_lock(lock_id: str) -> str:
     the required inspection/witness point has been satisfied. This releases the
     restriction so the held item can be turned in, UNLESS another lock of a
     different type is still on it. The lock stays visible on the item as a satisfied
-    hold point - unlocking is not withdrawing it, and it does not free the lock type
-    to be placed again.
+    hold point - unlocking is not withdrawing it. Only a currently-locked lock holds
+    its type's slot, so once unlocked, a new lock of the same type can be placed on
+    the item again (e.g. a re-inspection after a repair).
 
     Unlocking is a verification sign-off: it asserts the inspection actually
     happened. Do it ONLY when the lock's owner/author or the assigned inspector has
