@@ -194,6 +194,17 @@ def test_challenge_without_token_has_no_error(auth_app):
     assert rejected.count("scope=") == 1
 
 
+def test_body_without_token_has_no_error_code(auth_app):
+    client, state, _ = auth_app
+    r = rpc(client, token=None)
+    assert r.status_code == 401
+    assert r.json() == {"error_description": "Authentication required"}
+    assert int(r.headers["content-length"]) == len(r.content)
+    state["status"] = 401
+    rejected = rpc(client, token="bad-token")
+    assert rejected.json().get("error") == "invalid_token"
+
+
 def test_cors_preflight_and_401_for_allowed_origin(auth_app):
     client, _, _ = auth_app
     origin = "https://mcp.example.test"
