@@ -33,6 +33,9 @@ runtime = [
     # come in through mcp; pin minimums so pip never installs a vulnerable one.
     "pyjwt>=2.15",
     "cryptography>=50",
+    # certifi <2026.10.18 bundles emSign roots with compromised intermediate keys
+    # (GHSA-6q48-6c7w-9gw2, critical); comes in through httpx.
+    "certifi>=2026.10.18",
     "httpx>=0.27",
     # Used only for the optional --http (Streamable HTTP) transport; ships with mcp.
     "uvicorn>=0.30",
