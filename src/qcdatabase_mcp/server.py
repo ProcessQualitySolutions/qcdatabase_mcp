@@ -24,6 +24,7 @@ import json
 import mimetypes
 import site
 import sys
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import quote
@@ -1279,6 +1280,37 @@ def list_packages(job: str = "", status: str = "", package_type: str = "", searc
     return _render_list("Packages:", data)
 
 
+def _test_pressure(value: Any) -> Any:
+    """Normalize test_pressure to the decimal string the API's DecimalField
+    (max 8 integer digits, 2 decimals) accepts, or "" when not supplied.
+
+    Units are rejected rather than stripped: '150 psig' vs '150 bar' vs '10 MPa'
+    is not ours to guess, and silently storing 150 for '10 MPa' would be wrong."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return ""
+    if isinstance(value, bool):
+        raise ValueError("test_pressure must be a number, e.g. 150.")
+    text = str(value).strip()
+    try:
+        number = Decimal(text)
+    except InvalidOperation:
+        raise ValueError(
+            f"test_pressure must be a bare number with no units (e.g. 150), not "
+            f"{value!r}. The API stores only the number; leave out 'psi'/'psig'/"
+            "'bar' and convert to the project's pressure unit yourself."
+        ) from None
+    if not number.is_finite():
+        raise ValueError(f"test_pressure must be a finite number, not {value!r}.")
+    quantized = number.quantize(Decimal("0.01"))
+    if quantized != number:
+        raise ValueError(f"test_pressure allows at most 2 decimal places, not {value!r}.")
+    if abs(quantized) >= Decimal("1e8"):
+        raise ValueError(
+            f"test_pressure is too large (at most 8 digits before the decimal point): {value!r}."
+        )
+    return format(quantized, "f")
+
+
 @_tool('Create Package')
 @_safe
 def create_package(
@@ -1287,7 +1319,7 @@ def create_package(
     code: str,
     package_type: str = "",
     description: str = "",
-    test_pressure: str = "",
+    test_pressure: Optional[float] = None,
     test_medium: str = "",
     line_spec: str = "",
     assigned_to: str = "",
@@ -1302,12 +1334,17 @@ def create_package(
     test_medium), a governing line_spec id, an assignee user id, status
     (draft/open/in_progress/testing/completed/rejected), metadata (a JSON object),
     and the PCF isometric north settings: pcf_north_indicator_on and
-    pcf_north_axis (Y/X/Y-decreasing/X-decreasing)."""
+    pcf_north_axis (Y/X/Y-decreasing/X-decreasing).
+
+    'test_pressure' is a bare NUMBER with no units (e.g. 150 or 150.5; at most
+    8 digits and 2 decimals). The API stores only the number and records no
+    unit, so text such as '150 psig' is rejected - convert to the project's
+    pressure unit and pass the number."""
     pid = require_project()
     payload: dict[str, Any] = {"project": pid, "job": job, "name": name, "code": code}
     payload.update(_update_payload(
         {"package_type": package_type, "description": description,
-         "test_pressure": test_pressure, "test_medium": test_medium,
+         "test_pressure": _test_pressure(test_pressure), "test_medium": test_medium,
          "line_spec": line_spec, "assigned_to": assigned_to, "status": status,
          "pcf_north_indicator_on": pcf_north_indicator_on, "pcf_north_axis": pcf_north_axis},
         "", {},
@@ -1327,7 +1364,7 @@ def update_package(
     description: str = "",
     package_type: str = "",
     status: str = "",
-    test_pressure: str = "",
+    test_pressure: Optional[float] = None,
     test_medium: str = "",
     line_spec: str = "",
     assigned_to: str = "",
@@ -1344,11 +1381,17 @@ def update_package(
     (supplied keys overwrite, a key set to null is removed, others are kept).
     To empty a field, name it in 'clear' (comma separated): description,
     test_pressure, test_medium, line_spec, assigned_to, pcf_north_indicator_on,
-    pcf_north_axis."""
+    pcf_north_axis.
+
+    'test_pressure' is a bare NUMBER with no units (e.g. 150 or 150.5; at most
+    8 digits and 2 decimals). The API stores only the number and records no
+    unit, so text such as '150 psig' is rejected - convert to the project's
+    pressure unit and pass the number."""
     path = f"/api/packages/{package_id}/"
     payload = _update_payload(
         {"name": name, "code": code, "description": description,
-         "package_type": package_type, "status": status, "test_pressure": test_pressure,
+         "package_type": package_type, "status": status,
+         "test_pressure": _test_pressure(test_pressure),
          "test_medium": test_medium, "line_spec": line_spec, "assigned_to": assigned_to,
          "pcf_north_indicator_on": pcf_north_indicator_on, "pcf_north_axis": pcf_north_axis},
         clear,
@@ -2215,6 +2258,11 @@ def create_map_item(
     they are recorded only through 'mark_map_item_complete' /
     'mark_map_item_accepted', never set here.
 
+    LABELS AND AUTO-NUMBERING. If the project has auto-numbering with
+    auto-rename turned on for this schema (e.g. Pipe Weld -> WN-1, WN-2, ...),
+    the API replaces 'label' with the next number. The reply reports the label
+    actually stored and says when it differs from the one you asked for.
+
     Placing from another system's PDF positions: PDF coordinates are in points
     (1/72 inch) with a BOTTOM-left origin and y up. Scale each axis by the
     pixel/point ratio and flip y into this canvas (top-left, y down):
@@ -2255,7 +2303,16 @@ def create_map_item(
         "", {},
     ))
     result = client().post("/api/mapping/items/", json=payload)
-    return f"Created map item '{label}'.\n\n{_pretty(result)}"
+    stored = result.get("label") if isinstance(result, dict) else None
+    if stored and str(stored) != label:
+        head = (
+            f"Created map item '{stored}'. Note: this project's auto-numbering "
+            f"renamed it from the requested label '{label}' to '{stored}'; use "
+            f"'{stored}' (or the id) to refer to it."
+        )
+    else:
+        head = f"Created map item '{stored or label}'."
+    return f"{head}\n\n{_pretty(result)}"
 
 
 # Statuses an assistant may set directly. 'completed' and 'accepted' are buy-offs
@@ -2312,7 +2369,9 @@ def update_map_item(
     item can strand its data and sign-offs - do that in the web app. To edit the
     item's schema data fields, use 'bulk_update_map_items' (it merges keys).
     Confirm changes to signed-off items with the user and check the returned
-    status."""
+    status. An item under an active lock (quality hold, see 'add_lock') cannot
+    be edited or deleted until the lock is cleared; the API rejects the call
+    with the lock message."""
     payload = _update_payload(
         {"label": label, "x_position": x_position, "y_position": y_position,
          "x_position_2": x_position_2, "y_position_2": y_position_2,
@@ -2414,7 +2473,10 @@ def bulk_update_map_items(drawing_id: str, schema_id: str, items: str) -> str:
     """Edit the schema DATA fields of many existing map items on ONE drawing in a
     single request (up to 500). Every item must belong to the given drawing and
     schema, so drawing_id and schema_id are given once here, never per item. The
-    batch is atomic: one bad id rejects the whole request.
+    batch is atomic: one bad id, one item under an active lock (quality hold),
+    or one value the schema doesn't allow rejects the whole request, and the
+    error lists each failing item (by position and label) with the reason.
+    Locked items must be unlocked first (see 'add_lock').
 
     This edits ONLY schema data fields. It cannot move (x_position/y_position/
     flag_rotation), rename (label), change status, or reassign an item - supplying
@@ -2933,6 +2995,22 @@ def complete_form_submission(submission_id: str) -> str:
 _NOTE_SEVERITIES = ("severe_issue", "issue", "questionable", "neutral", "positive")
 
 
+def _check_page_url(page_url: str) -> str:
+    """A note's page_url is a relative app path ('/projects/...'); the API rejects
+    absolute, protocol-relative and scheme URLs. Fail early with the fix."""
+    url = page_url.strip()
+    if not url.startswith("/") or url.startswith("//") or "\\" in url:
+        raise ValueError(
+            f"page_url must be a relative app path starting with a single '/', "
+            f"e.g. /projects/<project_id>/drawings/<drawing_id>/ - not {page_url!r}. "
+            "For a full URL like https://qcdatabase.ai/projects/..., pass only the "
+            "path part (/projects/...)."
+        )
+    if len(url) > 500:
+        raise ValueError("page_url is too long (500 characters at most).")
+    return url
+
+
 @_tool('Create Note')
 @_safe
 def create_note(
@@ -2945,7 +3023,12 @@ def create_note(
     """Create a note (observation, action item, issue) on the current project.
     Optionally make it private, set a severity, anchor it to a page_url, and
     assign (@mention) it to a project member by their user id. severity, when
-    given, must be one of: severe_issue, issue, questionable, neutral, positive."""
+    given, must be one of: severe_issue, issue, questionable, neutral, positive.
+
+    'page_url' must be a RELATIVE app path starting with a single '/', e.g.
+    /projects/<project_id>/drawings/<drawing_id>/ (max 500 characters).
+    Absolute URLs (https://qcdatabase.ai/...), protocol-relative ('//host/...')
+    and scheme URLs are rejected - drop the scheme and host, keep the path."""
     pid = require_project()
     payload: dict[str, Any] = {"content": content, "is_private": is_private}
     if severity:
@@ -2957,7 +3040,7 @@ def create_note(
             )
         payload["severity"] = sev
     if page_url:
-        payload["page_url"] = page_url
+        payload["page_url"] = _check_page_url(page_url)
     if assigned_to:
         payload["assigned_to"] = assigned_to
     result = client().post(f"/api/notes/projects/{pid}/", json=payload)
@@ -3275,9 +3358,12 @@ def add_lock(
     """Place a quality-hold lock on a map item or ITP line item - a construction
     witness/hold point (fit-up inspection, tack-up inspection, weld-area cleanliness
     check, FME inspection, final-closure inspection, boiler-tube FME sponge-in/
-    sponge-out, etc.). Once placed, regular users CANNOT turn in (mark complete)
-    that item until an authorized inspector clears the hold - this is a real-world
-    quality gate, not a security or access control.
+    sponge-out, etc.). Once placed, the item is FROZEN until an authorized
+    inspector clears the hold: regular users CANNOT turn it in (mark complete) or
+    accept it, and NOBODY can edit or delete it through any write path
+    ('update_map_item', 'bulk_update_map_items', delete) - those calls are
+    rejected with the lock message. This is a real-world quality gate, not a
+    security or access control.
 
     ONLY place a lock when the user explicitly asks you to hold something because
     they intend to personally verify it. Never add a lock on your own initiative,
@@ -3593,15 +3679,22 @@ def turnover_report() -> str:
 def list_shippers(search: str = "", drawing_id: str = "", external_ref: str = "") -> str:
     """List the shippers (shipments) in the current project, newest first.
     Optionally narrow to the shippers a drawing (spool) is on with 'drawing_id',
-    or to the one carrying your own 'external_ref'. 'search' is passed through,
-    but the shippers list has no text search on the API side, so it does not
-    narrow the list; use 'semantic_search' (item_type='shippers') to find
-    shippers by meaning."""
+    or to the one carrying your own 'external_ref'.
+
+    'search' is a case-insensitive text match applied by this tool to every
+    field of each shipper (number, notes, locations, status, ...). The API's
+    list endpoint declares a 'search' parameter but ignores it, so the match is
+    done here after fetching the list. To find shippers by meaning rather than
+    by exact text, use 'semantic_search' with item_type='shippers' (the API's
+    /shippers/.../search/?q= endpoint)."""
     pid = require_project()
     data = client().get_all(
-        f"/api/shippers/projects/{pid}/", search=search or None, drawing=drawing_id or None,
+        f"/api/shippers/projects/{pid}/", drawing=drawing_id or None,
         external_ref=external_ref or None,
     )
+    if search.strip():
+        data = _text_match(data, search)
+        return _render_list(f"Shippers matching '{search.strip()}':", data)
     return _render_list("Shippers:", data)
 
 
@@ -3625,13 +3718,25 @@ def list_shipper_line_items(shipper_id: str, search: str = "") -> str:
     line was added (drawing number, revision, package, BOM rows, map items),
     loose-item descriptions and quantities, receiving notes, and whether (and by
     whom) each line was received.
-    'search' is passed through, but this list has no text search on the API
-    side, so it does not narrow the list."""
+
+    'search' is a case-insensitive text match applied by this tool to every
+    field of each line (drawing number, item description, notes, ...). The
+    API's line-items endpoint declares a 'search' parameter but ignores it, and
+    there is no semantic search for line items, so the match is done here."""
     pid = require_project()
-    data = client().get_all(
-        f"/api/shippers/projects/{pid}/{shipper_id}/line-items/", search=search or None
-    )
+    data = client().get_all(f"/api/shippers/projects/{pid}/{shipper_id}/line-items/")
+    if search.strip():
+        data = _text_match(data, search)
+        return _render_list(f"Line items on shipper {shipper_id} matching '{search.strip()}':", data)
     return _render_list(f"Line items on shipper {shipper_id}:", data)
+
+
+def _text_match(items: list[Any], search: str) -> list[Any]:
+    """Keep the records whose fields contain *search* (case-insensitive), for
+    list endpoints whose own 'search' parameter is a no-op on the API side."""
+    needle = search.strip().casefold()
+    return [it for it in items
+            if needle in json.dumps(it, ensure_ascii=False, default=str).casefold()]
 
 
 @_tool('List Shipper Types', read_only=True)

@@ -475,11 +475,13 @@ These rules are enforced in code by `_guard_local_path` in `server.py`.
 - **"Not logged in."** Ask the assistant to *connect to QC Database* and finish
   the sign-in in your browser.
 - **"No project is set."** Ask it to *work on* a project, or to *list projects*.
-- **A newer feature says "Access denied (403)" (e.g. the user manual, or the
-  quality-hold locks).** If you first signed in with an older version, your saved
-  app registration predates that feature's permission. Delete your `store.json`
-  (see **Privacy & safety** for its location) and sign in again — that
-  re-registers the app with the current permissions.
+- **"Access denied (403): missing OAuth scope …"** (e.g. `shippers:write` or
+  `qr:write`). Your sign-in was approved before that permission existed. Reconnect
+  the connector (hosted) and approve the named scope; for stdio, delete your
+  `store.json` (see **Privacy & safety** for its location) and sign in again —
+  that re-registers the app with the current permissions. A 403 that does *not*
+  name a scope is a project membership/role problem: a project admin has to grant
+  access, and reconnecting won't help.
 - **The browser didn't open during login.** The assistant will show you a link —
   open it manually to finish, then sign in again.
 - **The sign-in page can't connect / port already in use.** The login uses a
