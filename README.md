@@ -192,7 +192,9 @@ Then ask Claude to **"connect to QC Database"** to sign in — see below.
 - **Projects, jobs & packages:** `update_project`, `list_jobs`, `create_job`,
   `update_job`, `list_packages`, `create_package`, `update_package`,
   `list_line_specs`, `create_line_spec`, `update_line_spec` (updates change only
-  the fields you pass; name a field in `clear` to empty it)
+  the fields you pass; name a field in `clear` to empty it),
+  `attach_line_spec_documents`, `detach_line_spec_documents`,
+  `generate_line_spec_requirements` (an AI draft; save it with `update_line_spec`)
 - **Upload records:** `upload_document`, `upload_document_version`,
   `download_document`, `upload_drawing`, `upload_large_format_drawing`,
   `upload_drawing_to_package`, `upload_drawing_version`,
@@ -245,10 +247,20 @@ Then ask Claude to **"connect to QC Database"** to sign in — see below.
   `list_shipper_types`, `list_shipper_locations`, `create_shipper`,
   `update_shipper`, `set_shipper_status`, `add_shipper_line_items`,
   `update_shipper_line_item`, `remove_shipper_line_item` (a soft delete),
-  `delete_shipper` (project admins only; a soft delete). Any status other than
-  draft locks a shipper; unlocking, receiving and checklists stay in the web app.
-  Needs the `shippers:write` scope: connections approved before it was added must
-  reconnect (stdio: run `login` again) to get it
+  `reorder_shipper_line_items`, `delete_shipper` (project admins only; a soft
+  delete), `unlock_shipper`; checklists: `confirm_shipper_checklist_item`,
+  `unconfirm_shipper_checklist_item`; receiving: `receive_shipper_line_item`,
+  `unreceive_shipper_line_item`, `add_shipper_line_item_note`,
+  `remove_shipper_line_item_note`, `list_shipper_note_categories`; `audit_shipper`,
+  `export_shipper_pdf`; building a shipment: `find_drawings_to_ship`,
+  `get_drawing_bom_for_shipping`, `list_drawing_map_items_for_shipping`,
+  `list_non_drawing_item_suggestions`; settings (project admins):
+  `create_shipper_type`, `update_shipper_type`, `delete_shipper_type`,
+  `create_shipper_location`, `update_shipper_location`, `delete_shipper_location`.
+  Any status other than draft locks a shipper until it is unlocked; checklists,
+  receiving and notes work on locked shippers, with the web app's rules. Needs the
+  `shippers:write` scope: connections approved before it was added must reconnect
+  (stdio: run `login` again) to get it
 - **Semantic search (meaning-based, ranked):** `semantic_search` — natural-language
   search across the project's documents, drawings, large-format drawings, jobs,
   packages, list items, map items, form submissions, notes, and shippers

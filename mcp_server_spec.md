@@ -210,7 +210,8 @@ complete.
   keeping the record (and who removed it) intact.
 - **Jobs & packages:** `/api/jobs/…`, `/api/packages/…` — work orders and the test
   packages under them.
-- **Line specifications:** `/api/line-specs/…`.
+- **Line specifications:** `/api/line-specs/…`, plus `attach-documents/`, `detach-documents/`
+  (`{"document_ids": [...]}`) and `generate-requirements/` (no body; returns an unsaved draft).
 - **Documents:** `/api/documents/…` — upload (optionally filed to a folder whose
   schema drives extraction), read extracted data, upload new versions, download the
   original, set extracted data, read a document's change history (`{id}/history/`),
@@ -275,10 +276,16 @@ complete.
 - **Shippers:** `/api/shippers/projects/{project_id}/…` — shipments and their
   line items, plus the project's shipper types and locations. Create a draft
   shipper, edit its header, add / update / remove line items (a **soft** delete),
-  and set a status; any status other than draft locks the shipper (`409
-  shipper_locked` on later edits). Unlocking back to draft, receiving line items
-  and checklist confirmations stay in the web app. Deleting a shipper (soft) is
-  for project admins only.
+  reorder them, and set a status; any status other than draft locks the shipper
+  (`409 shipper_locked` on later edits) until `POST …/{id}/unlock/`. Checklist
+  items are confirmed / unconfirmed by position
+  (`…/{id}/checklists/{outgoing|receiving}/{index}/confirm/`; send the item text
+  as `item` to get `409 checklist_changed` if the list moved); lines are received
+  (`…/line-items/{id}/receive/`) and get receiving notes; both work on locked
+  shippers. Also the drawing audit, the PDF export, the builder lookups
+  (`drawings/search/`, `drawings/{id}/bom/`, `drawings/{id}/map-items/`,
+  `non-drawing-suggestions/`), and shipper types and locations (Project Admins).
+  Deleting a shipper (soft) is for project admins only.
 - **Community forum:** `/api/forum/…` — boards, posts (filter by board, search,
   `is_question`) and threaded replies, with an optional image on a post or reply.
   The forum is **cross-tenant**: every QC Database user at every company can read
