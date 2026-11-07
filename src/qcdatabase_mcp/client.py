@@ -205,16 +205,27 @@ class QCClient:
             exc = APIError(self._training_required(resp))
         elif code == 403 and self._missing_scope(resp) is not None:
             scope = self._missing_scope(resp)
-            exc = APIError(
-                "Access denied (403): your sign-in does not include the permission "
-                f"(OAuth scope{' ' + scope if scope else ''}) this action needs. "
-                "Sign in again (or reconnect the connector) and approve it. "
-                f"{detail}"
-            )
+            if scope:
+                exc = APIError(
+                    f"Access denied (403): missing OAuth scope {scope}. Your sign-in "
+                    f"does not include the '{scope}' permission this action needs. "
+                    "Reconnecting the connector (or signing in again) and approving "
+                    f"the '{scope}' scope will fix this; retrying as-is will not. "
+                    f"{detail}".rstrip()
+                )
+            else:
+                exc = APIError(
+                    "Access denied (403): your sign-in does not include the permission "
+                    "(OAuth scope) this action needs. Reconnecting the connector (or "
+                    "signing in again) and approving the requested permissions will "
+                    f"fix this. {detail}".rstrip()
+                )
         elif code == 403:
             exc = APIError(
-                "Access denied (403). You are signed in but are not a member of "
-                f"this project, or your app lacks the needed permission. {detail}"
+                "Access denied (403). You are signed in, but your account is not a "
+                "member of this project or lacks the role/permission for this "
+                "action (this is not a missing OAuth scope, so reconnecting will "
+                f"not help - a project admin has to grant access). {detail}"
             )
         elif code == 404:
             exc = APIError(
@@ -222,16 +233,34 @@ class QCClient:
                 f"your login is pinned to. {detail}"
             )
         elif code == 400:
-            exc = APIError(
-                f"The request was rejected (400). Often this means an id belongs "
-                f"to a different project or organization. {detail}"
+            hint = (
+                " This usually means an id is wrong or belongs to a different "
+                "project or organization."
+                if self._mentions_unknown_id(detail) else ""
             )
+            exc = APIError(f"The request was rejected (400).{hint} {detail}")
         else:
             exc = APIError(f"QC Database returned an error ({code}). {detail}")
         # Expose the HTTP status so callers can react to specific codes (e.g. a
         # download falling back from the base64 route to the raw export on 413).
         exc.status_code = code  # type: ignore[attr-defined]
         raise exc
+
+    # Phrases the API uses when a 400 is about an id it can't resolve (DRF's
+    # "Invalid pk ... does not exist", bulk-update's "no map item ... on this
+    # drawing", cross-project checks). Only then is the "wrong/foreign id" hint
+    # useful; for a bad value or a lock it sends agents looking in the wrong place.
+    _UNKNOWN_ID_PHRASES = (
+        "does not exist", "not found", "invalid pk", "no map item", "no such",
+        "different project", "another project", "other project",
+        "different organization", "another organization", "belongs to",
+        "not in this project", "not part of this project",
+    )
+
+    @classmethod
+    def _mentions_unknown_id(cls, detail: str) -> bool:
+        text = (detail or "").lower()
+        return any(p in text for p in cls._UNKNOWN_ID_PHRASES)
 
     @staticmethod
     def _code(resp: httpx.Response) -> str:
@@ -301,7 +330,7 @@ class QCClient:
                     code = body.get("code")
                     tag = f" [code: {code}]" if isinstance(code, str) and code and code != body[key] else ""
                     return str(body[key]) + tag + QCClient._itemized(body)
-            return "; ".join(f"{k}: {v}" for k, v in body.items())[:400]
+            return "; ".join(f"{k}: {QCClient._flatten(v)}" for k, v in body.items())[:800]
         return str(body)[:300]
 
     @staticmethod
@@ -313,8 +342,23 @@ class QCClient:
         failed - RFC 6901 JSON pointers, codes, and messages. Dropping that array
         would leave the assistant with "validation failed" and nothing to fix.
         """
-        errors = body.get("errors")
-        if not isinstance(errors, list) or not errors:
+        # Different endpoints name the list differently: ``errors`` (zipmap
+        # ingest), ``details`` (map-item bulk create/update/delete - the lock and
+        # per-item enum messages live here), ``validation_errors`` (extracted
+        # data) and ``field_errors`` (a {field: message} dict).
+        errors: Any = None
+        for key in ("errors", "details", "validation_errors", "field_errors"):
+            value = body.get(key)
+            if isinstance(value, dict) and value:
+                errors = [{"field": k, "message": QCClient._flatten(v)} for k, v in value.items()]
+                break
+            if isinstance(value, list) and value:
+                errors = value
+                break
+            if isinstance(value, str) and value and key != "errors":
+                errors = [value]
+                break
+        if not errors:
             return ""
         lines = []
         for item in errors[:20]:
@@ -327,6 +371,15 @@ class QCClient:
         if len(errors) > 20:
             lines.append(f"  - ... and {len(errors) - 20} more")
         return "\n" + "\n".join(lines)
+
+    @staticmethod
+    def _flatten(value: Any) -> str:
+        """DRF field errors are usually ``["msg", ...]``; show them as text."""
+        if isinstance(value, list):
+            return " ".join(QCClient._flatten(v) for v in value)
+        if isinstance(value, dict):
+            return "; ".join(f"{k}: {QCClient._flatten(v)}" for k, v in value.items())
+        return str(value)
 
     # ----- convenience verbs --------------------------------------------
     def get(self, path: str, **params: Any) -> Any:

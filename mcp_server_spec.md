@@ -247,8 +247,9 @@ complete.
   and confirm the scope package *before* sending the document.
 - **Quality-hold locks:** `/api/locks/projects/{project_id}/…` — quality hold /
   witness points on a map item or ITP line item (fit-up, FME, final-closure
-  inspections, etc.). A lock holds an item until an authorized inspector clears it,
-  so it cannot be turned in with the hold in place. Lock *types* are the named hold
+  inspections, etc.). A lock holds an item until an authorized inspector clears it:
+  with the hold in place it cannot be turned in, accepted, edited or deleted
+  (including through bulk update). Lock *types* are the named hold
   definitions; *locks* are the holds placed on items (place, unlock — which keeps
   the record — reassign, and delete: a **soft** delete that withdraws the hold and
   frees its type to be re-held, while the lock itself is retained in the audit
