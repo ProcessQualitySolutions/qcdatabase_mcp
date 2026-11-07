@@ -1411,6 +1411,51 @@ def update_line_spec(line_spec_id: str, name: str = "", requirements: str = "",
     return f"Line specification {line_spec_id} updated.\n\n{_pretty(result)}"
 
 
+@_tool('Attach Line Spec Documents')
+@_safe
+def attach_line_spec_documents(line_spec_id: str, document_ids: str) -> str:
+    """Attach documents (spec books, standards, procedures) to a line
+    specification. 'document_ids' is comma separated or a JSON array of
+    document ids in the line spec's project; ids from other projects are
+    ignored and already attached ones are left as they are. Needs project
+    admin rights."""
+    ids = _document_ids_arg(document_ids)
+    result = client().post(f"/api/line-specs/{line_spec_id}/attach-documents/",
+                           json={"document_ids": ids})
+    count = result.get("attached") if isinstance(result, dict) else None
+    return f"Attached {count if count is not None else len(ids)} document(s) to line spec {line_spec_id}."
+
+
+@_tool('Detach Line Spec Documents', destructive=True)
+@_safe
+def detach_line_spec_documents(line_spec_id: str, document_ids: str) -> str:
+    """Detach documents from a line specification (the documents themselves
+    are not touched). 'document_ids' is comma separated or a JSON array; ids
+    that are not attached are ignored. Needs project admin rights."""
+    ids = _document_ids_arg(document_ids)
+    result = client().post(f"/api/line-specs/{line_spec_id}/detach-documents/",
+                           json={"document_ids": ids})
+    count = result.get("detached") if isinstance(result, dict) else None
+    return f"Detached {count if count is not None else len(ids)} document(s) from line spec {line_spec_id}."
+
+
+@_tool('Generate Line Spec Requirements')
+@_safe
+def generate_line_spec_requirements(line_spec_id: str) -> str:
+    """Draft a line specification's quality requirements with AI from the
+    extracted data of its attached documents: a numbered plain-text list
+    (testing, acceptance criteria, materials, compliance). The draft is NOT
+    saved: show it to the user, and save the version they approve with
+    'update_line_spec' (requirements=...). Fails when no attached document has
+    extracted data, or when AI is off for the workspace. Needs project admin
+    rights."""
+    result = client().post(f"/api/line-specs/{line_spec_id}/generate-requirements/")
+    text = result.get("requirements") if isinstance(result, dict) else None
+    if not text:
+        return f"No requirements were generated.\n\n{_pretty(result)}"
+    return f"Draft requirements for line spec {line_spec_id} (not saved yet):\n\n{text}"
+
+
 # ===========================================================================
 # Documents
 # ===========================================================================
@@ -3538,10 +3583,11 @@ def turnover_report() -> str:
 # A shipper is a shipment header (type, date, send / receive locations) with
 # line items: drawings (spools) or loose non-drawing goods. It is editable only
 # while its status is draft. Any other status locks it, and the API answers 409
-# (shipper_locked) to further edits. Unlocking (back to draft), receiving line
-# items and checklist confirmations are web-app only; the API has no endpoint
-# for them. Writes need the shippers:write scope and the same project write
-# rule as the web app.
+# (shipper_locked) to further edits until it is unlocked. Checklists, receiving
+# and receiving notes work on locked shippers. Every step the web app offers is
+# here, with the web app's rules (qcdatabase.ai #124). Writes need the
+# shippers:write scope and the same project write rule as the web app; types
+# and locations need a Project Admin.
 @_tool('List Shippers', read_only=True)
 @_safe
 def list_shippers(search: str = "", drawing_id: str = "", external_ref: str = "") -> str:
@@ -3563,8 +3609,11 @@ def list_shippers(search: str = "", drawing_id: str = "", external_ref: str = ""
 @_safe
 def get_shipper(shipper_id: str) -> str:
     """Get one shipper: its status and lock state, type, locations, notes,
-    available_statuses (the values 'set_shipper_status' accepts), checklist
-    state and line_item_count. Use 'list_shipper_line_items' for its lines."""
+    available_statuses (the values 'set_shipper_status' accepts), the
+    checklists (outgoing_checklist_items / receiving_checklist_items, and who
+    confirmed what in outgoing_checklist_state / receiving_checklist_state,
+    keyed by item index), the last audit, and line_item_count. Use
+    'list_shipper_line_items' for its lines."""
     pid = require_project()
     return _pretty(client().get(f"/api/shippers/projects/{pid}/{shipper_id}/"))
 
@@ -3574,7 +3623,8 @@ def get_shipper(shipper_id: str) -> str:
 def list_shipper_line_items(shipper_id: str, search: str = "") -> str:
     """List the line items on one shipper: the drawing data frozen when each
     line was added (drawing number, revision, package, BOM rows, map items),
-    loose-item descriptions and quantities, and whether each line was received.
+    loose-item descriptions and quantities, receiving notes, and whether (and by
+    whom) each line was received.
     'search' is passed through, but this list has no text search on the API
     side, so it does not narrow the list."""
     pid = require_project()
@@ -3590,7 +3640,8 @@ def list_shipper_types() -> str:
     """List the shipper types configured for the current project. A type
     supplies a new shipper's default send / receive locations and notes, its
     checklists, and its allowed statuses ('statuses'). Use a type's id with
-    'create_shipper'. Types are managed in the web app's Project Admin."""
+    'create_shipper'. Project Admins manage them with 'create_shipper_type',
+    'update_shipper_type' and 'delete_shipper_type'."""
     pid = require_project()
     return _render_list("Shipper types:", client().get_all(f"/api/shippers/projects/{pid}/types/"))
 
@@ -3600,7 +3651,8 @@ def list_shipper_types() -> str:
 def list_shipper_locations() -> str:
     """List the shipper locations (shops, sites, yards) configured for the
     current project. Use a location's id for a shipper's send_location /
-    receive_location. Locations are managed in the web app's Project Admin."""
+    receive_location. Project Admins manage them with 'create_shipper_location',
+    'update_shipper_location' and 'delete_shipper_location'."""
     pid = require_project()
     return _render_list("Shipper locations:", client().get_all(f"/api/shippers/projects/{pid}/locations/"))
 
@@ -3682,7 +3734,7 @@ def update_shipper(
     receive_location, notes, external_ref.
 
     A locked shipper (any status other than draft) cannot be edited: the API
-    answers 409 shipper_locked, and unlocking it is done in the web app. Use
+    answers 409 shipper_locked; 'unlock_shipper' puts it back to draft. Use
     'set_shipper_status' to change the status. Needs write access to the
     project: Project Admins, Managers and Inspectors have it; a Viewer / Field
     member only if their user type has the Shippers Edit permission."""
@@ -3709,10 +3761,11 @@ def set_shipper_status(shipper_id: str, status: str) -> str:
 
     Any status other than draft LOCKS the shipper: its header and line items can
     no longer be edited or removed. A locked shipper can still move between
-    non-draft statuses. Moving back to draft unlocks it, and that is done in the
-    web app only, so this tool refuses 'draft'. Setting 'received' only changes
-    the status; receiving individual line items and the checklists are done in
-    the web app. Confirm with the user before locking a shipper. Needs write
+    non-draft statuses. To go back to draft use 'unlock_shipper' (this tool
+    refuses 'draft' so an unlock is always explicit). Setting 'received' only
+    changes the status; receive the lines with 'receive_shipper_line_item' and
+    tick the checklists with 'confirm_shipper_checklist_item'. Confirm with the
+    user before locking a shipper. Needs write
     access to the project: Project Admins, Managers and Inspectors have it; a
     Viewer / Field member only if their user type has the Shippers Edit
     permission."""
@@ -3721,8 +3774,7 @@ def set_shipper_status(shipper_id: str, status: str) -> str:
         raise ValueError("Supply a status. 'get_shipper' lists the shipper's available_statuses.")
     if status == "draft":
         raise ValueError(
-            "Moving a shipper back to draft unlocks it, which is done in the QC Database "
-            "web app (the API does not allow it)."
+            "Moving a shipper back to draft unlocks it: use 'unlock_shipper' for that."
         )
     pid = require_project()
     result = client().patch(f"/api/shippers/projects/{pid}/{shipper_id}/", json={"status": status})
@@ -3827,6 +3879,467 @@ def remove_shipper_line_item(shipper_id: str, item_id: str) -> str:
         f"Line item {item_id} removed from shipper {shipper_id} (soft-deleted: hidden, "
         "kept on record)."
     )
+
+
+
+def _ids_arg(name: str, raw: Any) -> list[str]:
+    """Comma-separated (or JSON array) ids in order, without duplicates."""
+    if isinstance(raw, list):
+        parts = [str(p).strip() for p in raw]
+    else:
+        text = (raw or "").strip()
+        parts = _parse_json_arg(name, text) if text.startswith("[") else text.split(",")
+        if not isinstance(parts, list):
+            raise ValueError(f"'{name}' must be comma-separated ids or a JSON array of ids.")
+        parts = [str(p).strip() for p in parts]
+    ids = list(dict.fromkeys(p for p in parts if p))
+    if not ids:
+        raise ValueError(f"Supply at least one id in '{name}'.")
+    return ids
+
+
+def _checklist_kind(kind: str) -> str:
+    kind = (kind or "").strip().lower()
+    if kind not in ("outgoing", "receiving"):
+        raise ValueError("'kind' must be 'outgoing' or 'receiving'.")
+    return kind
+
+
+@_tool('Unlock Shipper', destructive=True, idempotent=True)
+@_safe
+def unlock_shipper(shipper_id: str) -> str:
+    """Put a locked shipper (any status other than draft) back to draft, so its
+    header and line items can be edited again; the web app's Unlock button.
+    Checklist confirmations, received lines and notes are kept. Confirm with
+    the user first: a shipped shipper is usually locked on purpose.
+
+    Needs write access to the project: Project Admins, Managers and
+    Inspectors have it; a Viewer / Field member only if their user type has
+    the Shippers Edit permission."""
+    pid = require_project()
+    result = client().post(f"/api/shippers/projects/{pid}/{shipper_id}/unlock/")
+    return f"Shipper {shipper_id} unlocked (back to draft).\n\n{_pretty(result)}"
+
+
+def _set_checklist_item(shipper_id: str, kind: str, index: int, item: str, action: str) -> Any:
+    kind = _checklist_kind(kind)
+    if index is None or int(index) < 0:
+        raise ValueError("'index' is the zero-based position of the item in the checklist.")
+    pid = require_project()
+    body = {"item": item} if item else {}
+    return client().post(
+        f"/api/shippers/projects/{pid}/{shipper_id}/checklists/{kind}/{int(index)}/{action}/", json=body
+    )
+
+
+@_tool('Confirm Shipper Checklist Item', destructive=True, idempotent=True)
+@_safe
+def confirm_shipper_checklist_item(shipper_id: str, kind: str, index: int, item: str = "") -> str:
+    """Confirm (tick) one checklist item on a shipper, recording you as the
+    confirmer with the time. Confirming an item that is already confirmed
+    keeps the original confirmation. Only confirm what the user has actually
+    checked.
+
+    'kind' is outgoing (before shipping) or receiving (on arrival). 'index'
+    is the item's zero-based position in the shipper's
+    outgoing_checklist_items / receiving_checklist_items (see
+    'get_shipper'): the list the shipper is signed against, frozen at its
+    first confirmation, so edits to the shipper type cannot move a
+    confirmation. Pass the item text you read as 'item': if the checklist
+    changed since, the API answers 409 checklist_changed instead of
+    confirming a different item; read the shipper again. Works on locked
+    (shipped) shippers, as in the web app.
+
+    Needs write access to the project: Project Admins, Managers and
+    Inspectors have it; a Viewer / Field member only if their user type has
+    the Shippers Edit permission."""
+    result = _set_checklist_item(shipper_id, kind, index, item, "confirm")
+    return f"Confirmed {kind} checklist item {index} on shipper {shipper_id}.\n\n{_pretty(result)}"
+
+
+@_tool('Unconfirm Shipper Checklist Item', destructive=True, idempotent=True)
+@_safe
+def unconfirm_shipper_checklist_item(shipper_id: str, kind: str, index: int, item: str = "") -> str:
+    """Clear one checklist confirmation on a shipper. When nothing on that list is
+    confirmed any more, the shipper follows its type's checklist again.
+
+    'kind' is outgoing (before shipping) or receiving (on arrival). 'index'
+    is the item's zero-based position in the shipper's
+    outgoing_checklist_items / receiving_checklist_items (see
+    'get_shipper'): the list the shipper is signed against, frozen at its
+    first confirmation, so edits to the shipper type cannot move a
+    confirmation. Pass the item text you read as 'item': if the checklist
+    changed since, the API answers 409 checklist_changed instead of
+    confirming a different item; read the shipper again. Works on locked
+    (shipped) shippers, as in the web app.
+
+    Needs write access to the project: Project Admins, Managers and
+    Inspectors have it; a Viewer / Field member only if their user type has
+    the Shippers Edit permission."""
+    result = _set_checklist_item(shipper_id, kind, index, item, "unconfirm")
+    return f"Cleared {kind} checklist item {index} on shipper {shipper_id}.\n\n{_pretty(result)}"
+
+
+@_tool('Receive Shipper Line Item', destructive=True, idempotent=True)
+@_safe
+def receive_shipper_line_item(shipper_id: str, item_id: str) -> str:
+    """Mark a line item received, recording you and the time (received_by,
+    received_at). Receiving again restamps who and when, as in the web app.
+    A received line can no longer be edited or removed. Works on locked
+    (shipped) shippers. Only receive what the user has actually checked in.
+
+    Needs write access to the project: Project Admins, Managers and
+    Inspectors have it; a Viewer / Field member only if their user type has
+    the Shippers Edit permission."""
+    pid = require_project()
+    result = client().post(f"/api/shippers/projects/{pid}/{shipper_id}/line-items/{item_id}/receive/")
+    return f"Line item {item_id} received.\n\n{_pretty(result)}"
+
+
+@_tool('Unreceive Shipper Line Item', destructive=True, idempotent=True)
+@_safe
+def unreceive_shipper_line_item(shipper_id: str, item_id: str) -> str:
+    """Undo receiving a line item (clears received_by and received_at).
+
+    Needs write access to the project: Project Admins, Managers and
+    Inspectors have it; a Viewer / Field member only if their user type has
+    the Shippers Edit permission."""
+    pid = require_project()
+    result = client().post(f"/api/shippers/projects/{pid}/{shipper_id}/line-items/{item_id}/unreceive/")
+    return f"Line item {item_id} is no longer received.\n\n{_pretty(result)}"
+
+
+@_tool('List Shipper Note Categories', read_only=True)
+@_safe
+def list_shipper_note_categories() -> str:
+    """List the categories a receiving note can have (some items missing, damaged,
+    wrong revision, ...). Use a category's key with 'add_shipper_line_item_note'."""
+    return _render_list("Receiving-note categories:", client().get("/api/shippers/note-categories/"))
+
+
+@_tool('Add Shipper Line Item Note')
+@_safe
+def add_shipper_line_item_note(shipper_id: str, item_id: str, category: str, text: str = "") -> str:
+    """Add a receiving note to a line item, e.g. category='some_damaged', text='2
+    flanges dented'. 'category' is a key from
+    'list_shipper_note_categories'. The note records you and the time. Works
+    on locked (shipped) shippers.
+
+    Needs write access to the project: Project Admins, Managers and
+    Inspectors have it; a Viewer / Field member only if their user type has
+    the Shippers Edit permission."""
+    if not (category or "").strip():
+        raise ValueError("Supply a category; 'list_shipper_note_categories' lists them.")
+    payload: dict[str, Any] = {"category": category.strip()}
+    if text:
+        payload["text"] = text
+    pid = require_project()
+    result = client().post(
+        f"/api/shippers/projects/{pid}/{shipper_id}/line-items/{item_id}/notes/", json=payload
+    )
+    return f"Note added to line item {item_id}.\n\n{_pretty(result)}"
+
+
+@_tool('Remove Shipper Line Item Note', destructive=True)
+@_safe
+def remove_shipper_line_item_note(shipper_id: str, item_id: str, note_id: str) -> str:
+    """Remove a receiving note from a line item by its id (the 'id' in the line's
+    'notes', see 'list_shipper_line_items'). Confirm with the user first.
+
+    Needs write access to the project: Project Admins, Managers and
+    Inspectors have it; a Viewer / Field member only if their user type has
+    the Shippers Edit permission."""
+    pid = require_project()
+    client().delete(f"/api/shippers/projects/{pid}/{shipper_id}/line-items/{item_id}/notes/{note_id}/")
+    return f"Note {note_id} removed from line item {item_id}."
+
+
+@_tool('Reorder Shipper Line Items', destructive=True, idempotent=True)
+@_safe
+def reorder_shipper_line_items(shipper_id: str, item_ids: str) -> str:
+    """Set the order of a draft shipper's line items in one call. 'item_ids' is
+    every line item id of the shipper, each once, in the new order (comma
+    separated or a JSON array); the API refuses a partial list. A locked
+    shipper answers 409 shipper_locked.
+
+    Needs write access to the project: Project Admins, Managers and
+    Inspectors have it; a Viewer / Field member only if their user type has
+    the Shippers Edit permission."""
+    ids = _ids_arg("item_ids", item_ids)
+    pid = require_project()
+    result = client().post(
+        f"/api/shippers/projects/{pid}/{shipper_id}/line-items/reorder/", json={"item_ids": ids}
+    )
+    return _render_list(f"Line items on shipper {shipper_id}, in the new order:", result)
+
+
+@_tool('Audit Shipper')
+@_safe
+def audit_shipper(shipper_id: str) -> str:
+    """Check a shipper against its drawings as they are now: for each line, did the
+    drawing number, title, revision, package or spec change since it was
+    added? Partial BOM and map-item lines are also compared by AI (so this
+    uses AI and is refused when AI is off for the workspace). The result is
+    stored on the shipper (audit_results, audit_run_at) and returned.
+
+    Needs write access to the project: Project Admins, Managers and
+    Inspectors have it; a Viewer / Field member only if their user type has
+    the Shippers Edit permission."""
+    pid = require_project()
+    result = client().post(f"/api/shippers/projects/{pid}/{shipper_id}/audit/")
+    lines = result.get("audit_results", []) if isinstance(result, dict) else []
+    changed = [r for r in lines if r.get("status") != "ok"]
+    head = (f"Audited {len(lines)} line(s): {len(changed)} with changes or errors."
+            if lines else "Audited the shipper: it has no line items.")
+    return f"{head}\n\n{_pretty(result)}"
+
+
+@_tool('Export Shipper PDF', structured_output=False)
+@_safe
+def export_shipper_pdf(
+    shipper_id: str,
+    include_checklists: bool = False,
+    include_comments: bool = False,
+    include_drawings: bool = False,
+    include_drawing_qr: bool = False,
+    include_photos: bool = False,
+    save_path: str = "",
+) -> Any:
+    """Export a shipper as a PDF (the web app's Export button), optionally with
+    its checklists, receiving notes ('include_comments'), drawings, drawing QR
+    codes and photos.
+
+    On the local (stdio) server it is written to 'save_path' on disk; on the
+    hosted server it is returned inline over the MCP connection (save it from
+    the attached file resource), and 'save_path' only names the file."""
+    flags = {"include_checklists": include_checklists, "include_comments": include_comments,
+             "include_drawings": include_drawings, "include_drawing_qr": include_drawing_qr,
+             "include_photos": include_photos}
+    pid = require_project()
+    content = client().download(
+        f"/api/shippers/projects/{pid}/{shipper_id}/export-pdf/",
+        **{k: "true" for k, v in flags.items() if v},
+    )
+    return _deliver_download(content, save_path or f"shipper-{shipper_id}.pdf")
+
+
+# --- shipper settings (types and locations) -------------------------------------
+def _list_arg(name: str, raw: str) -> list[str] | None:
+    """A JSON array of strings, or newline / comma separated text; None when blank."""
+    text = (raw or "").strip()
+    if not text:
+        return None
+    if text.startswith("["):
+        value = _parse_json_arg(name, text)
+        if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+            raise ValueError(f"'{name}' must be a JSON array of strings.")
+        return [v.strip() for v in value if v.strip()]
+    sep = "\n" if "\n" in text else ","
+    return [v.strip() for v in text.split(sep) if v.strip()]
+
+
+def _type_payload(name, default_send_location, default_receive_location, default_notes,
+                  outgoing_checklist, receiving_checklist, statuses) -> dict[str, Any]:
+    payload = _update_payload(
+        {"name": name, "default_send_location": default_send_location,
+         "default_receive_location": default_receive_location, "default_notes": default_notes},
+        "", {},
+    )
+    for key, raw in (("outgoing_checklist", outgoing_checklist),
+                     ("receiving_checklist", receiving_checklist), ("statuses", statuses)):
+        value = _list_arg(key, raw)
+        if value is not None:
+            payload[key] = value
+    return payload
+
+
+@_tool('Create Shipper Type')
+@_safe
+def create_shipper_type(
+    name: str,
+    default_send_location: str = "",
+    default_receive_location: str = "",
+    default_notes: str = "",
+    outgoing_checklist: str = "",
+    receiving_checklist: str = "",
+    statuses: str = "",
+) -> str:
+    """Create a shipper type: the default send / receive locations and notes a new
+    shipper of this type gets, its checklists and its statuses.
+
+    'outgoing_checklist' / 'receiving_checklist' are the checklist items and
+    'statuses' the statuses offered for its shippers (empty means draft /
+    shipped / received), each as a JSON array of strings or one item per
+    line (or comma separated). Locations are ids from
+    'list_shipper_locations'.
+
+    Project Admins only (superuser, the tenant's CSA, or the project's
+    Admin), as on the web settings page."""
+    if not (name or "").strip():
+        raise ValueError("Supply a name.")
+    payload = _type_payload(name, default_send_location, default_receive_location, default_notes,
+                            outgoing_checklist, receiving_checklist, statuses)
+    pid = require_project()
+    result = client().post(f"/api/shippers/projects/{pid}/types/", json=payload)
+    return f"Created shipper type '{name.strip()}'.\n\n{_pretty(result)}"
+
+
+@_tool('Update Shipper Type', destructive=True)
+@_safe
+def update_shipper_type(
+    type_id: str,
+    name: str = "",
+    default_send_location: str = "",
+    default_receive_location: str = "",
+    default_notes: str = "",
+    outgoing_checklist: str = "",
+    receiving_checklist: str = "",
+    statuses: str = "",
+    clear: str = "",
+) -> str:
+    """Update a shipper type. Only the fields you supply are changed; a list you
+    supply replaces the whole list. Shippers that already have checklist
+    confirmations keep the list they were signed against; the others follow
+    the new one. To empty a field, name it in 'clear' (comma separated):
+    default_send_location, default_receive_location, default_notes,
+    outgoing_checklist, receiving_checklist, statuses.
+
+    'outgoing_checklist' / 'receiving_checklist' are the checklist items and
+    'statuses' the statuses offered for its shippers (empty means draft /
+    shipped / received), each as a JSON array of strings or one item per
+    line (or comma separated). Locations are ids from
+    'list_shipper_locations'.
+
+    Project Admins only (superuser, the tenant's CSA, or the project's
+    Admin), as on the web settings page."""
+    payload = _type_payload(name, default_send_location, default_receive_location, default_notes,
+                            outgoing_checklist, receiving_checklist, statuses)
+    payload.update(_update_payload({}, clear, {
+        "default_send_location": None, "default_receive_location": None, "default_notes": "",
+        "outgoing_checklist": [], "receiving_checklist": [], "statuses": [],
+    }))
+    if not payload:
+        return "Nothing to update. Supply at least one field to change (or name fields in 'clear')."
+    pid = require_project()
+    result = client().patch(f"/api/shippers/projects/{pid}/types/{type_id}/", json=payload)
+    return f"Shipper type {type_id} updated.\n\n{_pretty(result)}"
+
+
+@_tool('Delete Shipper Type', destructive=True)
+@_safe
+def delete_shipper_type(type_id: str) -> str:
+    """Delete a shipper type, as on the web settings page. Its shippers keep their
+    data and become typeless (their statuses fall back to draft / shipped /
+    received). This is a real delete, not a soft one: confirm with the user
+    first.
+
+    Project Admins only (superuser, the tenant's CSA, or the project's
+    Admin), as on the web settings page."""
+    pid = require_project()
+    client().delete(f"/api/shippers/projects/{pid}/types/{type_id}/")
+    return f"Shipper type {type_id} deleted."
+
+
+@_tool('Create Shipper Location')
+@_safe
+def create_shipper_location(name: str, address: str = "", contact_person: str = "") -> str:
+    """Create a shipper location (a shop, site or yard) to send from or receive at.
+
+    Project Admins only (superuser, the tenant's CSA, or the project's
+    Admin), as on the web settings page."""
+    if not (name or "").strip():
+        raise ValueError("Supply a name.")
+    payload = _update_payload({"name": name, "address": address, "contact_person": contact_person}, "", {})
+    pid = require_project()
+    result = client().post(f"/api/shippers/projects/{pid}/locations/", json=payload)
+    return f"Created shipper location '{name.strip()}'.\n\n{_pretty(result)}"
+
+
+@_tool('Update Shipper Location', destructive=True)
+@_safe
+def update_shipper_location(location_id: str, name: str = "", address: str = "",
+                            contact_person: str = "", clear: str = "") -> str:
+    """Update a shipper location. Only the fields you supply are changed. To empty
+    a field, name it in 'clear': address, contact_person.
+
+    Project Admins only (superuser, the tenant's CSA, or the project's
+    Admin), as on the web settings page."""
+    payload = _update_payload({"name": name, "address": address, "contact_person": contact_person},
+                              clear, {"address": "", "contact_person": ""})
+    if not payload:
+        return "Nothing to update. Supply at least one field to change (or name fields in 'clear')."
+    pid = require_project()
+    result = client().patch(f"/api/shippers/projects/{pid}/locations/{location_id}/", json=payload)
+    return f"Shipper location {location_id} updated.\n\n{_pretty(result)}"
+
+
+@_tool('Delete Shipper Location', destructive=True)
+@_safe
+def delete_shipper_location(location_id: str) -> str:
+    """Delete a shipper location, as on the web settings page. Shippers and types
+    that used it keep their data with no location. This is a real delete,
+    not a soft one: confirm with the user first.
+
+    Project Admins only (superuser, the tenant's CSA, or the project's
+    Admin), as on the web settings page."""
+    pid = require_project()
+    client().delete(f"/api/shippers/projects/{pid}/locations/{location_id}/")
+    return f"Shipper location {location_id} deleted."
+
+
+# --- shipment-builder lookups -----------------------------------------------------
+@_tool('Find Drawings To Ship', read_only=True)
+@_safe
+def find_drawings_to_ship(query: str) -> str:
+    """Find up to 20 drawings in the current project whose number, title or line
+    number contains 'query' (2+ characters), with their revision, package and
+    spec, to add to a shipper. Multi-sheet parents are left out: ship their
+    sheets."""
+    if len((query or "").strip()) < 2:
+        raise ValueError("'query' needs at least 2 characters.")
+    pid = require_project()
+    data = client().get(f"/api/shippers/projects/{pid}/drawings/search/", q=query.strip())
+    return _render_list(f"Drawings matching '{query.strip()}':", data)
+
+
+@_tool('Get Drawing BOM For Shipping', read_only=True)
+@_safe
+def get_drawing_bom_for_shipping(drawing_id: str) -> str:
+    """List a drawing's extracted bill of materials with each row's index, for a
+    partial_bom line item: pass the indexes of the rows that ship loose as
+    'bom_indexes' to 'add_shipper_line_items'."""
+    pid = require_project()
+    data = client().get(f"/api/shippers/projects/{pid}/drawings/{drawing_id}/bom/")
+    rows = data.get("bom", []) if isinstance(data, dict) else []
+    if not rows:
+        return f"Drawing {drawing_id} has no extracted bill of materials."
+    return "Bill of materials (index: row):\n" + "\n".join(
+        f"  {i}: {json.dumps(row, ensure_ascii=False)}" for i, row in enumerate(rows))
+
+
+@_tool('List Drawing Map Items For Shipping', read_only=True)
+@_safe
+def list_drawing_map_items_for_shipping(drawing_id: str, schema_id: str = "") -> str:
+    """List the map items on a drawing (label, status, schema, data), for a
+    partial_map_items line item: pass the ids of the items that ship as
+    'map_items' to 'add_shipper_line_items'. 'schema_id' narrows to one schema."""
+    pid = require_project()
+    data = client().get(f"/api/shippers/projects/{pid}/drawings/{drawing_id}/map-items/",
+                        schema_id=schema_id or None)
+    return _render_list(f"Map items on drawing {drawing_id}:", data)
+
+
+@_tool('List Non-Drawing Item Suggestions', read_only=True)
+@_safe
+def list_non_drawing_item_suggestions() -> str:
+    """List the descriptions already used for non-drawing (loose goods) line
+    items in the current project, so new lines can reuse the same wording."""
+    pid = require_project()
+    data = client().get(f"/api/shippers/projects/{pid}/non-drawing-suggestions/")
+    items = data.get("suggestions", []) if isinstance(data, dict) else []
+    if not items:
+        return "No non-drawing item descriptions used in this project yet."
+    return "Non-drawing item descriptions in use:\n" + "\n".join(f"  - {s}" for s in items)
 
 
 # ===========================================================================
