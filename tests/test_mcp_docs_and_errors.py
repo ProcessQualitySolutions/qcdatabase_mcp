@@ -199,21 +199,35 @@ def test_test_pressure_can_still_be_cleared(calls):
 
 
 # --- #37 shipper search ----------------------------------------------------------
-def test_list_shippers_search_filters_locally(calls):
-    calls.responses[("GET", "/api/shippers/projects/p1/")] = [
-        {"id": "s1", "number": "ZZ Demo BOL 001"}, {"id": "s2", "number": "ZZ Demo BOL 002"}]
-    out = server.list_shippers(search="bol 001")
-    assert "s1" in out and "s2" not in out
-    assert "search" not in dict(calls[0].url.params)
+# The API filters since qcdatabase.ai #153; the tools pass 'search' through and
+# render what comes back (no client-side filter).
+def test_list_shippers_search_is_sent_to_the_api(calls):
+    calls.responses[("GET", "/api/shippers/projects/p1/")] = [{"id": "s1", "title": "ZZ Demo BOL 001"}]
+    out = server.list_shippers(search="  bol 001 ", drawing_id="d9")
+    params = dict(calls[0].url.params)
+    assert params["search"] == "bol 001" and params["drawing"] == "d9"
+    assert "matching 'bol 001'" in out and "s1" in out
     assert "semantic_search" in _tools()["list_shippers"].description
 
 
-def test_list_shipper_line_items_search_filters_locally(calls):
+def test_list_shippers_without_search_sends_no_param(calls):
+    calls.responses[("GET", "/api/shippers/projects/p1/")] = []
+    server.list_shippers()
+    assert "search" not in dict(calls[0].url.params)
+
+
+def test_list_shipper_line_items_search_is_sent_to_the_api(calls):
     calls.responses[("GET", "/api/shippers/projects/p1/sh1/line-items/")] = [
-        {"id": "l1", "item_description": "Gasket kit"}, {"id": "l2", "item_description": "Bolts"}]
+        {"id": "l1", "item_description": "Gasket kit"}]
     out = server.list_shipper_line_items("sh1", search="GASKET")
-    assert "l1" in out and "l2" not in out
-    assert dict(calls[0].url.params) == {}
+    assert dict(calls[0].url.params)["search"] == "GASKET"
+    assert "l1" in out
+
+
+def test_list_shipper_line_items_without_search_sends_no_param(calls):
+    calls.responses[("GET", "/api/shippers/projects/p1/sh1/line-items/")] = []
+    server.list_shipper_line_items("sh1")
+    assert "search" not in dict(calls[0].url.params)
 
 
 # --- #38 create_note page_url ------------------------------------------------------

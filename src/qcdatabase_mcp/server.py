@@ -3681,20 +3681,20 @@ def list_shippers(search: str = "", drawing_id: str = "", external_ref: str = ""
     Optionally narrow to the shippers a drawing (spool) is on with 'drawing_id',
     or to the one carrying your own 'external_ref'.
 
-    'search' is a case-insensitive text match applied by this tool to every
-    field of each shipper (number, notes, locations, status, ...). The API's
-    list endpoint declares a 'search' parameter but ignores it, so the match is
-    done here after fetching the list. To find shippers by meaning rather than
-    by exact text, use 'semantic_search' with item_type='shippers' (the API's
-    /shippers/.../search/?q= endpoint)."""
+    'search' is a case-insensitive text match done by the API over the
+    shipper's title, status, notes, external_ref, type name and send / receive
+    location names. With several words, every word must match somewhere. It
+    combines with 'drawing_id' and 'external_ref'. To find shippers by meaning
+    rather than by exact text, use 'semantic_search' with item_type='shippers'
+    (the API's /shippers/.../search/?q= endpoint)."""
     pid = require_project()
+    q = search.strip()
     data = client().get_all(
         f"/api/shippers/projects/{pid}/", drawing=drawing_id or None,
-        external_ref=external_ref or None,
+        external_ref=external_ref or None, search=q or None,
     )
-    if search.strip():
-        data = _text_match(data, search)
-        return _render_list(f"Shippers matching '{search.strip()}':", data)
+    if q:
+        return _render_list(f"Shippers matching '{q}':", data)
     return _render_list("Shippers:", data)
 
 
@@ -3719,24 +3719,18 @@ def list_shipper_line_items(shipper_id: str, search: str = "") -> str:
     loose-item descriptions and quantities, receiving notes, and whether (and by
     whom) each line was received.
 
-    'search' is a case-insensitive text match applied by this tool to every
-    field of each line (drawing number, item description, notes, ...). The
-    API's line-items endpoint declares a 'search' parameter but ignores it, and
-    there is no semantic search for line items, so the match is done here."""
+    'search' is a case-insensitive text match done by the API over the item
+    description, the frozen drawing number / title / line number / revision,
+    package, line spec and map item schema names, receiving note text, map item
+    labels (marks such as W1) and BOM row values (item / part numbers,
+    descriptions). With several words, every word must match somewhere."""
     pid = require_project()
-    data = client().get_all(f"/api/shippers/projects/{pid}/{shipper_id}/line-items/")
-    if search.strip():
-        data = _text_match(data, search)
-        return _render_list(f"Line items on shipper {shipper_id} matching '{search.strip()}':", data)
+    q = search.strip()
+    data = client().get_all(
+        f"/api/shippers/projects/{pid}/{shipper_id}/line-items/", search=q or None)
+    if q:
+        return _render_list(f"Line items on shipper {shipper_id} matching '{q}':", data)
     return _render_list(f"Line items on shipper {shipper_id}:", data)
-
-
-def _text_match(items: list[Any], search: str) -> list[Any]:
-    """Keep the records whose fields contain *search* (case-insensitive), for
-    list endpoints whose own 'search' parameter is a no-op on the API side."""
-    needle = search.strip().casefold()
-    return [it for it in items
-            if needle in json.dumps(it, ensure_ascii=False, default=str).casefold()]
 
 
 @_tool('List Shipper Types', read_only=True)
