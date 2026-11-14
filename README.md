@@ -428,8 +428,10 @@ decisions, made with your go-ahead.
 
 A project admin can require a fresh **authenticator code** for chosen sign-offs
 (complete / accept map items and ITP lines, complete a form, unlock or delete a
-lock, shipper checklists, receiving and status changes, and edits or deletes that
-remove one of those sign-offs). The requirement applies to the browser, the API
+lock, shipper checklists, receiving and status changes, human audits of
+extracted data, and edits or deletes that
+remove one of those sign-offs, including deleting an audited document, saving
+over audited data, and replacing a signed drawing with `upload_zipmap`). The requirement applies to the browser, the API
 and AI assistants alike, and to every user including admins.
 
 - When a sign-off needs a code, the tool fails with a message telling the

@@ -123,4 +123,5 @@ def test_move_annotations_and_metadata_interface():
     assert set(tool.parameters["properties"]) == {"drawing_id", "destination_package_id"}
     assert set(tools["update_drawing"].parameters["properties"]) == {
         "drawing_id", "drawing_number", "title", "line_number", "sheet_number", "revision",
+        "totp_code",
     }

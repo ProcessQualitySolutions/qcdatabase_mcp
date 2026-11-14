@@ -1636,13 +1636,21 @@ def get_document(document_id: str) -> str:
 
 @_tool('Set Document Extracted Data', destructive=True, idempotent=True)
 @_safe
-def set_document_extracted_data(document_id: str, extracted_data: str) -> str:
+def set_document_extracted_data(
+    document_id: str, extracted_data: str, totp_code: str | None = None
+) -> str:
     """Write structured fields back onto a document (used after you run your own
     'bring your own AI' extraction). 'extracted_data' is a JSON object string
     matching the folder's schema - call 'list_document_folders' to see each
-    folder's extraction schema (the field names to use as keys here)."""
+    folder's extraction schema (the field names to use as keys here).
+
+    Saving over data that a person has audited clears that human-audit sign-off.
+    If the project requires 2FA for this sign-off, pass the user's current
+    authenticator code as totp_code (ask the user for it; one code per call)."""
     payload = {"extracted_data": _parse_json_arg("extracted_data", extracted_data)}
-    result = client().post(f"/api/documents/{document_id}/extracted-data/", json=payload)
+    result = client().post(
+        f"/api/documents/{document_id}/extracted-data/", json=payload, **_totp(totp_code)
+    )
     return f"Extracted data saved on document {document_id}.\n\n{_pretty(result)}"
 
 
@@ -1710,7 +1718,7 @@ def _document_ids_arg(raw: Any) -> list[str]:
 
 @_tool('Delete Document', destructive=True)
 @_safe
-def delete_document(document_id: str) -> str:
+def delete_document(document_id: str, totp_code: str | None = None) -> str:
     """Delete (archive) one document. This is a SOFT delete: the document
     leaves lists and lookups, but its file, versions, extracted data, history
     and references are kept, and 'restore_document' brings it back. Confirm with
@@ -1718,8 +1726,12 @@ def delete_document(document_id: str) -> str:
 
     Do not use this to replace a file with a newer revision; use
     'upload_document_version'. Needs project membership; a Viewer / Field member
-    also needs the Delete permission on the document's folder."""
-    client().delete(f"/api/documents/{document_id}/")
+    also needs the Delete permission on the document's folder.
+
+    Deleting a document whose extracted data a person has audited removes that
+    sign-off from the live project. If the project requires 2FA for this sign-off, pass the
+    user's current authenticator code as totp_code (ask the user for it; one code per call)."""
+    client().delete(f"/api/documents/{document_id}/", **_totp(totp_code))
     return (
         f"Document {document_id} deleted (archived: hidden from lists, kept on record; "
         "'restore_document' brings it back)."
@@ -1728,7 +1740,7 @@ def delete_document(document_id: str) -> str:
 
 @_tool('Bulk Delete Documents', destructive=True)
 @_safe
-def bulk_delete_documents(document_ids: str) -> str:
+def bulk_delete_documents(document_ids: str, totp_code: str | None = None) -> str:
     """Delete (archive) up to 200 documents of the current project in one call.
     'document_ids' is a comma-separated list (or JSON array) of document ids.
     All or nothing: if any id is not a live document in this project, or you
@@ -1738,10 +1750,17 @@ def bulk_delete_documents(document_ids: str) -> str:
     data, history and references are kept, and 'bulk_restore_documents' brings
     them back. Confirm the list with the user first. Needs project membership;
     a Viewer / Field member also needs the Delete permission on every document's
-    folder."""
+    folder.
+
+    Deleting documents whose extracted data a person has audited removes those
+    sign-offs from the live project. If the project requires 2FA for this sign-off, pass the
+    user's current authenticator code as totp_code (ask the user for it; one code per call).
+    One code covers the whole batch."""
     pid = require_project()
     ids = _document_ids_arg(document_ids)
-    result = client().post("/api/documents/bulk-delete/", json={"project": pid, "ids": ids})
+    result = client().post(
+        "/api/documents/bulk-delete/", json={"project": pid, "ids": ids}, **_totp(totp_code)
+    )
     count = result.get("deleted", len(ids)) if isinstance(result, dict) else len(ids)
     return f"Deleted (archived) {count} document(s). They can be restored with 'bulk_restore_documents'."
 
@@ -1866,6 +1885,7 @@ def update_drawing(
     line_number: Optional[str] = None,
     sheet_number: Optional[str] = None,
     revision: Optional[str] = None,
+    totp_code: str | None = None,
 ) -> str:
     """Update identifying metadata on a drawing record in the active project.
 
@@ -1877,6 +1897,10 @@ def update_drawing(
     Omit a field to leave it unchanged. An empty drawing_number, line_number, or
     sheet_number clears that field. Title and revision must be nonblank when
     supplied.
+
+    Changing these values on a drawing whose extracted data a person has audited
+    alters signed-off data. If the project requires 2FA for this sign-off, pass
+    the user's current authenticator code as totp_code (ask the user for it; one code per call).
     """
     pid = require_project()
     payload: dict[str, str] = {}
@@ -1925,7 +1949,7 @@ def update_drawing(
             f"project {pid}; refusing to update it."
         )
 
-    result = c.patch(f"/api/drawings/{drawing_id}/", json=payload)
+    result = c.patch(f"/api/drawings/{drawing_id}/", json=payload, **_totp(totp_code))
     return f"Drawing {drawing_id} updated.\n\n{_pretty(result)}"
 
 
@@ -2088,10 +2112,16 @@ def upload_drawing_version(drawing_id: str, file_path: str, do_not_extract: bool
 
 @_tool('Upload Large Format Drawing Version')
 @_safe
-def upload_large_format_drawing_version(lfd_id: str, file_path: str, do_not_extract: bool = False) -> str:
+def upload_large_format_drawing_version(
+    lfd_id: str, file_path: str, do_not_extract: bool = False, totp_code: str | None = None
+) -> str:
     """Upload a new revision of an existing large-format drawing. The current file
     and its data are archived as a prior version. Set do_not_extract=True to skip
-    server-side extraction."""
+    server-side extraction.
+
+    A new revision clears a human-audit sign-off on the current data.
+    If the project requires 2FA for this sign-off, pass the user's current
+    authenticator code as totp_code (ask the user for it; one code per call)."""
     pid = require_project()
     name, fh, ctype = _open_file(file_path)
     try:
@@ -2100,6 +2130,7 @@ def upload_large_format_drawing_version(lfd_id: str, file_path: str, do_not_extr
             f"/api/drawings/projects/{pid}/large-format/{lfd_id}/version/",
             files=[("file", (name, fh, ctype))],
             data=data,
+            **_totp(totp_code),
         )
     finally:
         fh.close()
@@ -2921,6 +2952,7 @@ def upload_zipmap(
     mode: str = "append",
     schema_ids: str = "",
     extracted_data: str = "",
+    totp_code: str | None = None,
 ) -> str:
     """Upload a zipmap - a whole mapped drawing (image + PDF + every map item on it)
     in ONE transactional request. This is the streamlined way to bring in a weld map
@@ -2953,7 +2985,10 @@ def upload_zipmap(
     number, so re-sending a corrected map does not leave a duplicate behind. The
     replaced drawing is retained in the audit trail, but it stops appearing in
     drawing lists - and its map items go with it. Use 'replace' only when the user
-    has asked to supersede that drawing.
+    has asked to supersede that drawing. Replacing a drawing that carries completed
+    or accepted map items, or a human-audit stamp, removes those sign-offs from the
+    live project. If the project requires 2FA for this sign-off, pass the user's current
+    authenticator code as totp_code (ask the user for it; one code per call).
 
     'extracted_data' optionally overrides the archive's extracted_data.json with a
     JSON object of drawing-level extraction (bill of materials, line number, ...).
@@ -3019,6 +3054,7 @@ def upload_zipmap(
         # builds all of it in a single transaction - well past the default read
         # timeout for a big map.
         timeout=_ZIPMAP_TIMEOUT,
+        **_totp(totp_code),
     )
     return _render_zipmap_result(result, picked)
 

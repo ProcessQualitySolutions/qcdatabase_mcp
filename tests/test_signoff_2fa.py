@@ -260,6 +260,9 @@ GATED = [
      f"/api/shippers/projects/{P}/s1/line-items/unreceive/"),
     ("bulk_unlock_locks", ("k1,k2",), {}, "POST", f"/api/locks/projects/{P}/locks/unlock/"),
     ("bulk_delete_locks", ("k1,k2",), {}, "POST", f"/api/locks/projects/{P}/locks/delete/"),
+    ("set_document_extracted_data", ("d1", '{"a": 1}'), {}, "POST", "/api/documents/d1/extracted-data/"),
+    ("delete_document", ("d1",), {}, "DELETE", "/api/documents/d1/"),
+    ("bulk_delete_documents", ("d1,d2",), {}, "POST", "/api/documents/bulk-delete/"),
 ]
 
 
@@ -286,7 +289,9 @@ SKIPPED = ("create_shipper", "update_shipper", "remove_shipper_line_item", "crea
 
 def test_gated_tools_document_and_expose_totp_code():
     tools = _tools()
-    names = {g[0] for g in GATED} | {"update_map_item"}
+    names = {g[0] for g in GATED} | {
+        "update_map_item", "update_drawing", "upload_large_format_drawing_version", "upload_zipmap",
+    }
     for name in names:
         tool = tools[name]
         assert "totp_code" in tool.parameters["properties"], name
@@ -519,3 +524,12 @@ def test_bulk_receive_uses_changed_items_header(calls):
     calls.reply = rows  # older server: no header
     out = server.bulk_receive_shipper_line_items("s1", "l1,l2")
     assert "changed by this request" not in out and "line(s) changed" not in out
+
+
+def test_update_drawing_passes_code(calls):
+    calls.reply = lambda req: {"id": "d1", "project": P}
+    server.update_drawing("d1", title="New title", totp_code=CODE)
+    assert calls.routes() == [("GET", "/api/drawings/d1/"), ("PATCH", "/api/drawings/d1/")]
+    assert TOTP_HEADER not in calls[0].headers
+    assert calls[1].headers[TOTP_HEADER] == CODE
+    assert calls.body() == {"title": "New title"}
