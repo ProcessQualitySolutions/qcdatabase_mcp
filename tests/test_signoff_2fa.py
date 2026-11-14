@@ -291,6 +291,7 @@ def test_gated_tools_document_and_expose_totp_code():
     tools = _tools()
     names = {g[0] for g in GATED} | {
         "update_map_item", "update_drawing", "upload_large_format_drawing_version", "upload_zipmap",
+        "upload_document", "upload_document_version", "upload_drawing_version", "submit_fillable_template",
     }
     for name in names:
         tool = tools[name]

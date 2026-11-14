@@ -1597,7 +1597,9 @@ def list_documents(
 
 @_tool('Upload Document')
 @_safe
-def upload_document(file_path: str, folder_id: str = "", do_not_extract: bool = False) -> str:
+def upload_document(
+    file_path: str, folder_id: str = "", do_not_extract: bool = False, totp_code: str | None = None
+) -> str:
     """Upload a record (MTR, NDE report, certificate, procedure, etc.) to the
     current project. Optionally file it under a document folder id (recommended,
     so the right extraction schema runs). Set do_not_extract=True if you will
@@ -1608,7 +1610,14 @@ def upload_document(file_path: str, folder_id: str = "", do_not_extract: bool = 
     (item_type='documents') to look it up by name. If a match exists, ask the
     user whether to upload it as a new version with 'upload_document_version'
     (which archives the old file and its extracted data) rather than creating a
-    duplicate document."""
+    duplicate document.
+
+    Uploading a file with the same name as an existing document in the folder
+    becomes a new version of it.
+
+    Replacing the file of a record whose extracted data a person has audited
+    overwrites signed-off data. If the project requires 2FA for this sign-off, pass the user's current
+    authenticator code as totp_code (ask the user for it; one code per call)."""
     pid = require_project()
     name, fh, ctype = _open_file(file_path)
     try:
@@ -1621,6 +1630,7 @@ def upload_document(file_path: str, folder_id: str = "", do_not_extract: bool = 
             f"/api/documents/projects/{pid}/upload/",
             files=[("files", (name, fh, ctype))],
             data=data,
+            **_totp(totp_code),
         )
     finally:
         fh.close()
@@ -1656,11 +1666,17 @@ def set_document_extracted_data(
 
 @_tool('Upload Document Version')
 @_safe
-def upload_document_version(document_id: str, file_path: str, do_not_extract: bool = False) -> str:
+def upload_document_version(
+    document_id: str, file_path: str, do_not_extract: bool = False, totp_code: str | None = None
+) -> str:
     """Upload a new revision of an existing document. The current file and its
     extracted data are archived as a prior version and the new file is swapped in.
     Set do_not_extract=True to skip server-side extraction and supply your own
-    data afterwards with 'set_document_extracted_data'."""
+    data afterwards with 'set_document_extracted_data'.
+
+    Replacing the file of a record whose extracted data a person has audited
+    overwrites signed-off data. If the project requires 2FA for this sign-off, pass the user's current
+    authenticator code as totp_code (ask the user for it; one code per call)."""
     pid = require_project()
     name, fh, ctype = _open_file(file_path)
     try:
@@ -1669,6 +1685,7 @@ def upload_document_version(document_id: str, file_path: str, do_not_extract: bo
             f"/api/documents/projects/{pid}/document/{document_id}/version/",
             files=[("file", (name, fh, ctype))],
             data=data,
+            **_totp(totp_code),
         )
     finally:
         fh.close()
@@ -2092,10 +2109,16 @@ def upload_drawing_to_package(package_id: str, file_path: str, do_not_extract: b
 
 @_tool('Upload Drawing Version')
 @_safe
-def upload_drawing_version(drawing_id: str, file_path: str, do_not_extract: bool = False) -> str:
+def upload_drawing_version(
+    drawing_id: str, file_path: str, do_not_extract: bool = False, totp_code: str | None = None
+) -> str:
     """Upload a new revision of an existing drawing (a single-page PDF or image).
     The current image and its data are archived as a prior version and the new
-    file is swapped in. Set do_not_extract=True to skip server-side extraction."""
+    file is swapped in. Set do_not_extract=True to skip server-side extraction.
+
+    Replacing the file of a record whose extracted data a person has audited
+    overwrites signed-off data. If the project requires 2FA for this sign-off, pass the user's current
+    authenticator code as totp_code (ask the user for it; one code per call)."""
     pid = require_project()
     name, fh, ctype = _open_file(file_path)
     try:
@@ -2104,6 +2127,7 @@ def upload_drawing_version(drawing_id: str, file_path: str, do_not_extract: bool
             f"/api/drawings/projects/{pid}/drawing/{drawing_id}/version/",
             files=[("file", (name, fh, ctype))],
             data=data,
+            **_totp(totp_code),
         )
     finally:
         fh.close()
@@ -3106,12 +3130,17 @@ def submit_fillable_template(
     file_path: str,
     file_name: str = "",
     do_not_extract: bool = False,
+    totp_code: str | None = None,
 ) -> str:
     """Submit a filled PDF back into a template's folder as a document. Re-using a
     file_name creates a new version of that document. Set do_not_extract=True if
     you will supply the extracted JSON yourself. Note: filling the PDF stores the
     signed record; to also populate structured fields, follow up with
-    'set_document_extracted_data' on the returned document."""
+    'set_document_extracted_data' on the returned document.
+
+    Replacing the file of a record whose extracted data a person has audited
+    overwrites signed-off data. If the project requires 2FA for this sign-off, pass the user's current
+    authenticator code as totp_code (ask the user for it; one code per call)."""
     pid = require_project()
     name, fh, ctype = _open_file(file_path)
     try:
@@ -3124,6 +3153,7 @@ def submit_fillable_template(
             f"/api/documents/projects/{pid}/fillable-templates/{folder_id}/submit/",
             files=[("filled_pdf", (name, fh, ctype))],
             data=data,
+            **_totp(totp_code),
         )
     finally:
         fh.close()
