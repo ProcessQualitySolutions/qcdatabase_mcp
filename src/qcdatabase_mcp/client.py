@@ -73,6 +73,44 @@ def _rewind_files(files: Any) -> None:
             pass  # not a seekable stream; nothing we can do
 
 
+# 2FA sign-offs (qcdatabase.ai docs/signoff_2fa_plan.md): a project can require
+# a fresh authenticator code for chosen buy-off actions. The code travels in
+# this header so it works for every method and body type (JSON, multipart,
+# DELETE). It is sent once and never logged, stored, or echoed in an error.
+TOTP_HEADER = "X-TOTP-Code"
+_TOTP_SHAPE = re.compile(r"\d{6,8}")
+
+SIGNOFF_2FA_POLICY = (
+    "Policy: the code must come from the user's own authenticator app on a device "
+    "they hold. Never guess, reuse, or generate a code, and never ask for or store "
+    "the authenticator secret."
+)
+
+
+def clean_totp_code(code: str | None) -> str | None:
+    """The code as it will be sent, or None when none was given.
+
+    Spaces and dashes a person may type ("123 456") are dropped. Anything that
+    is not 6-8 digits is refused locally, so a typo costs no rate-limit attempt
+    and no odd value reaches a request header. The message never repeats the
+    value."""
+    if code is None:
+        return None
+    text = re.sub(r"[\s-]", "", str(code))
+    if not text:
+        return None
+    if not _TOTP_SHAPE.fullmatch(text):
+        raise ValueError(
+            "totp_code must be the six-digit code shown in the user's authenticator "
+            "app (digits only). Ask the user for the current code. " + SIGNOFF_2FA_POLICY
+        )
+    return text
+
+
+def _redact(text: str, secret: str | None) -> str:
+    return text.replace(secret, "[redacted]") if secret and text else text
+
+
 def callback_port() -> int:
     raw = os.environ.get("QCDB_CALLBACK_PORT")
     if not raw:
@@ -117,6 +155,10 @@ class QCClient:
         # Set by get_all() when it stops at the page cap; callers that present
         # counts (e.g. turnover_report) can check it and flag "at least N".
         self.last_truncated = False
+        # Headers of the last response request() received, for the few routes
+        # that report extra detail there (e.g. X-Changed-Items on shipper
+        # batch receive). Never holds request headers.
+        self.last_response_headers: httpx.Headers = httpx.Headers()
         if http is not None:
             self._http = http
             self._owns_http = False
@@ -142,6 +184,7 @@ class QCClient:
         files: Any | None = None,
         timeout: float | None = None,
         headers: dict[str, str] | None = None,
+        totp_code: str | None = None,
     ) -> Any:
         """Make one authenticated request and return parsed JSON (or None).
 
@@ -150,10 +193,15 @@ class QCClient:
         ``timeout`` overrides the client default for this call - for endpoints
         that do a lot of work in one round trip (the zipmap ingest builds a
         drawing and all of its map items in a single transaction).
+
+        ``totp_code`` is the user's authenticator code for a 2FA-gated sign-off;
+        it is sent as the ``X-TOTP-Code`` header and kept nowhere else.
         """
         _check_api_path(path)
+        code = clean_totp_code(totp_code)
         clean_params = {k: v for k, v in (params or {}).items() if v is not None}
         extra: dict[str, Any] = {} if timeout is None else {"timeout": timeout}
+        step_up = {TOTP_HEADER: code} if code else {}
 
         def _send() -> httpx.Response:
             return self._http.request(
@@ -163,7 +211,7 @@ class QCClient:
                 json=json,
                 data=data,
                 files=files,
-                headers={**(headers or {}), **self._headers()},
+                headers={**(headers or {}), **step_up, **self._headers()},
                 **extra,
             )
 
@@ -179,9 +227,25 @@ class QCClient:
                 _rewind_files(files)
                 resp = _send()
         except httpx.HTTPError as exc:
-            raise APIError(f"Could not reach QC Database: {exc}") from exc
+            # With a code attached, do not chain the httpx error: it holds the
+            # request (and so the header) for anything that logs the traceback.
+            raise APIError(
+                f"Could not reach QC Database: {_redact(str(exc), code)}"
+            ) from (None if code else exc)
 
-        return self._handle(resp)
+        self.last_response_headers = resp.headers
+        if not code:
+            return self._handle(resp)
+        try:
+            return self._handle(resp)
+        except (APIError, AuthError) as exc:
+            # Defense in depth: an error body must never carry the code back.
+            text = str(exc)
+            if code in text:
+                clean = type(exc)(_redact(text, code))
+                clean.__dict__.update(exc.__dict__)
+                raise clean from None
+            raise
 
     def _handle(self, resp: httpx.Response) -> Any:
         if resp.is_success:
@@ -201,6 +265,8 @@ class QCClient:
             exc: Exception = AuthError(
                 "Your session is no longer valid. Run 'login' again."
             )
+        elif code in (403, 429) and self._code(resp) == "signoff_2fa_required":
+            exc = APIError(self._signoff_2fa_required(resp))
         elif code == 403 and self._code(resp) == "training_required":
             exc = APIError(self._training_required(resp))
         elif code == 403 and self._missing_scope(resp) is not None:
@@ -317,6 +383,70 @@ class QCClient:
         return "\n".join(lines)
 
     @staticmethod
+    def _signoff_2fa_required(resp: httpx.Response) -> str:
+        """A sign-off refused by the project's 2FA requirement: say, by reason,
+        what the assistant must ask the user for, then the policy line."""
+        body = resp.json()
+        reason = str(body.get("reason") or "missing")
+        status = resp.status_code
+        detail = str(body.get("detail") or "").strip()
+        actions = [str(a) for a in (body.get("actions") or []) if a]
+        head = f"2FA sign-off required ({status}) [code: signoff_2fa_required, reason: {reason}]."
+        if reason == "invalid":
+            what = (
+                "The authenticator code was not accepted (wrong or expired). Ask the user "
+                "for the NEXT code shown in their authenticator app (codes change every 30 "
+                "seconds and each can be used once), then call the tool again with it as "
+                "totp_code."
+            )
+        elif reason == "used":
+            what = (
+                "That authenticator code was already used (a code authorises one request; "
+                "signing in may have used the current one). Ask the user for the NEXT code "
+                "(codes change every 30 seconds and each can be used once), then call the "
+                "tool again with it as totp_code."
+            )
+        elif reason == "not_enrolled":
+            url = str(body.get("enroll_url") or "")
+            if url.startswith("/"):
+                url = BASE_URL + url
+            where = f" at {url}" if url else " (account security settings)"
+            what = (
+                "The user has no authenticator app set up, so they cannot perform this "
+                f"sign-off yet. They must set one up in QC Database{where} first; retrying "
+                "will not help until they have."
+            )
+        elif reason == "authenticator_too_new":
+            when = str(body.get("usable_at") or "").strip()
+            what = (
+                "The user's authenticator was set up or replaced recently and cannot be "
+                f"used for sign-offs until {when or 'the waiting period ends'}. A project "
+                "administrator can waive the wait. Do not retry before then."
+            )
+        elif reason == "rate_limited":
+            what = (
+                "Too many authenticator code attempts. Wait a few minutes, then ask the "
+                "user for a fresh code and try once more."
+            )
+        else:  # "missing" and anything new
+            what = (
+                "This sign-off requires a new code from the user's authenticator app. Ask "
+                "the user for the current six-digit code and call the tool again with it as "
+                "totp_code (one code per call; a bulk tool signs a whole batch with one code)."
+            )
+        lines = [head]
+        if detail:
+            lines.append(detail)
+        lines.append(what)
+        if actions:
+            lines.append("Sign-offs that need the code:")
+            lines.extend(f"- {a}" for a in actions[:20])
+            if len(actions) > 20:
+                lines.append(f"- ... and {len(actions) - 20} more")
+        lines.append(SIGNOFF_2FA_POLICY)
+        return "\n".join(lines)
+
+    @staticmethod
     def _detail(resp: httpx.Response) -> str:
         try:
             body = resp.json()
@@ -329,7 +459,10 @@ class QCClient:
                     # insufficient_ai_credits) tells the assistant what to do next.
                     code = body.get("code")
                     tag = f" [code: {code}]" if isinstance(code, str) and code and code != body[key] else ""
-                    return str(body[key]) + tag + QCClient._itemized(body)
+                    # DRF may wrap a message in a list (["..."]); show it as text.
+                    value = body[key]
+                    text = QCClient._flatten(value) if isinstance(value, list) else str(value)
+                    return text + tag + QCClient._itemized(body)
             return "; ".join(f"{k}: {QCClient._flatten(v)}" for k, v in body.items())[:800]
         return str(body)[:300]
 
@@ -347,7 +480,8 @@ class QCClient:
         # per-item enum messages live here), ``validation_errors`` (extracted
         # data) and ``field_errors`` (a {field: message} dict).
         errors: Any = None
-        for key in ("errors", "details", "validation_errors", "field_errors"):
+        # ``skipped`` is the ITP batch sign-off's list when nothing could change.
+        for key in ("errors", "details", "validation_errors", "field_errors", "skipped"):
             value = body.get(key)
             if isinstance(value, dict) and value:
                 errors = [{"field": k, "message": QCClient._flatten(v)} for k, v in value.items()]
@@ -363,8 +497,9 @@ class QCClient:
         lines = []
         for item in errors[:20]:
             if isinstance(item, dict):
-                where = item.get("pointer") or item.get("field") or item.get("item_id") or ""
-                msg = item.get("message") or item.get("detail") or str(item)
+                where = (item.get("pointer") or item.get("field") or item.get("item_id")
+                         or item.get("label") or item.get("id") or "")
+                msg = item.get("message") or item.get("detail") or item.get("error") or str(item)
                 lines.append(f"  - {where}: {msg}" if where else f"  - {msg}")
             else:
                 lines.append(f"  - {item}")
@@ -385,16 +520,23 @@ class QCClient:
     def get(self, path: str, **params: Any) -> Any:
         return self.request("GET", path, params=params)
 
+    # ``totp_code`` is keyword-only on every write verb, so it can never be
+    # mistaken for (and sent as) a query parameter.
     def post(
-        self, path: str, json: Any | None = None, *, timeout: float | None = None, **params: Any
+        self, path: str, json: Any | None = None, *, timeout: float | None = None,
+        totp_code: str | None = None, **params: Any
     ) -> Any:
-        return self.request("POST", path, json=json, params=params, timeout=timeout)
+        return self.request(
+            "POST", path, json=json, params=params, timeout=timeout, totp_code=totp_code
+        )
 
-    def patch(self, path: str, json: Any | None = None, **params: Any) -> Any:
-        return self.request("PATCH", path, json=json, params=params)
+    def patch(
+        self, path: str, json: Any | None = None, *, totp_code: str | None = None, **params: Any
+    ) -> Any:
+        return self.request("PATCH", path, json=json, params=params, totp_code=totp_code)
 
-    def delete(self, path: str, **params: Any) -> Any:
-        return self.request("DELETE", path, params=params)
+    def delete(self, path: str, *, totp_code: str | None = None, **params: Any) -> Any:
+        return self.request("DELETE", path, params=params, totp_code=totp_code)
 
     def download(self, path: str, **params: Any) -> bytes:
         """GET a binary file (a rendered PDF, an original upload) and return its
@@ -426,10 +568,14 @@ class QCClient:
         files: list[tuple[str, tuple[str, BinaryIO, str]]],
         data: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
+        *,
+        totp_code: str | None = None,
     ) -> Any:
         """POST a multipart/form-data body (file uploads)."""
         clean = {k: v for k, v in (data or {}).items() if v is not None}
-        return self.request("POST", path, files=files, data=clean or None, headers=headers)
+        return self.request(
+            "POST", path, files=files, data=clean or None, headers=headers, totp_code=totp_code
+        )
 
     # ----- pagination ----------------------------------------------------
     def get_all(self, path: str, **params: Any) -> list[Any]:

@@ -227,14 +227,20 @@ Then ask Claude to **"connect to QC Database"** to sign in — see below.
 - **Photos:** `list_photos`, `attach_photo`
 - **ITP & sign-offs (your call):** `list_itp_line_items`, `get_itp_line_item`,
   `create_itp_line_item`, `update_itp_line_item`, `mark_map_item_complete`,
-  `mark_map_item_accepted`, `mark_itp_complete`, `mark_itp_accepted`
+  `mark_map_item_accepted`, `mark_itp_complete`, `mark_itp_accepted`; batches
+  (one request, so one authenticator code when the project requires 2FA):
+  `bulk_mark_map_items_complete`, `bulk_mark_map_items_accepted` (up to 500),
+  `bulk_mark_itp_complete`, `bulk_mark_itp_accepted` (up to 500). See
+  [2FA sign-offs](#2fa-sign-offs)
 - **Quality-hold locks (witness/hold points — the user's call):** `list_lock_types`
   (read only), `list_locks`, `get_lock`, `add_lock` (place a hold point — fit-up,
   tack-up, weld-cleanliness, FME, final-closure, boiler-tube FME sponge-in/sponge-out,
   etc. — on a map item or ITP line item so it can't be turned in until inspected),
   `unlock_lock`, `assign_lock`, `delete_lock` (withdraws a hold placed in error — a
   soft delete: kept in the audit trail, no longer holding the item; use `unlock_lock`
-  for a hold that was actually satisfied). A lock is a construction quality gate,
+  for a hold that was actually satisfied), `bulk_unlock_locks`, `bulk_delete_locks`
+  (up to 500 per request, one authenticator code when the project requires 2FA).
+  A lock is a construction quality gate,
   **not** a security control; place or clear one only at the explicit request of its
   owner/author or an authorized inspector. **Creating or editing lock *types*** (the
   named hold definitions, and who may place/clear each) is intentionally **not**
@@ -249,8 +255,10 @@ Then ask Claude to **"connect to QC Database"** to sign in — see below.
   `update_shipper_line_item`, `remove_shipper_line_item` (a soft delete),
   `reorder_shipper_line_items`, `delete_shipper` (project admins only; a soft
   delete), `unlock_shipper`; checklists: `confirm_shipper_checklist_item`,
-  `unconfirm_shipper_checklist_item`; receiving: `receive_shipper_line_item`,
-  `unreceive_shipper_line_item`, `add_shipper_line_item_note`,
+  `unconfirm_shipper_checklist_item`, `bulk_confirm_shipper_checklist_items`,
+  `bulk_unconfirm_shipper_checklist_items`; receiving: `receive_shipper_line_item`,
+  `unreceive_shipper_line_item`, `bulk_receive_shipper_line_items`,
+  `bulk_unreceive_shipper_line_items`, `add_shipper_line_item_note`,
   `remove_shipper_line_item_note`, `list_shipper_note_categories`; `audit_shipper`,
   `export_shipper_pdf`; building a shipment: `find_drawings_to_ship`,
   `get_drawing_bom_for_shipping`, `list_drawing_map_items_for_shipping`,
@@ -416,6 +424,35 @@ but every one of those tools tells you plainly that **you are responsible for th
 action**. The server never signs anything off silently. Treat those as your
 decisions, made with your go-ahead.
 
+### 2FA sign-offs
+
+A project admin can require a fresh **authenticator code** for chosen sign-offs
+(complete / accept map items and ITP lines, complete a form, unlock or delete a
+lock, shipper checklists, receiving and status changes, and edits or deletes that
+remove one of those sign-offs). The requirement applies to the browser, the API
+and AI assistants alike, and to every user including admins.
+
+- When a sign-off needs a code, the tool fails with a message telling the
+  assistant to **ask you for the current six-digit code** from your
+  authenticator app. It then calls the tool again with that code as
+  `totp_code`. The server sends the code once, in the `X-TOTP-Code` header, and
+  never logs or stores it.
+- **One code authorises one request** and is then used up, and codes change every
+  30 seconds. To sign many items, ask for a batch: the `bulk_*` sign-off tools
+  sign the whole list with one code and report each item as changed, skipped
+  (with the reason, e.g. an active lock or a missing permission) or unchanged
+  (already in that state).
+- If you have no authenticator set up, the message gives the QC Database link to
+  set one up. A newly set up or replaced authenticator can't be used for
+  sign-offs for 24 hours (a project admin can waive the wait).
+
+**Policy.** The authenticator must be on a device held by the person signing.
+Reading a code to your assistant so it can act for you is allowed. Running an
+authenticator on the assistant's (agent's) computer or virtual machine, or giving
+an agent the authenticator secret, is against policy and invalidates the sign-off.
+Email and text-message (SMS) codes are not accepted. The assistant is told never
+to guess, reuse or generate a code and never to ask for the secret.
+
 ---
 
 ## Privacy & safety
@@ -482,6 +519,11 @@ These rules are enforced in code by `_guard_local_path` in `server.py`.
   that re-registers the app with the current permissions. A 403 that does *not*
   name a scope is a project membership/role problem: a project admin has to grant
   access, and reconnecting won't help.
+- **"2FA sign-off required … [code: signoff_2fa_required]".** The project needs a
+  code from your authenticator app for that sign-off: give the assistant the
+  current six-digit code. `reason: used` or `invalid` means wait for the next
+  code; `not_enrolled` means set up an authenticator in QC Database first. See
+  [2FA sign-offs](#2fa-sign-offs).
 - **The browser didn't open during login.** The assistant will show you a link —
   open it manually to finish, then sign in again.
 - **The sign-in page can't connect / port already in use.** The login uses a
