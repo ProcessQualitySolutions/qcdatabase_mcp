@@ -21,7 +21,9 @@ import base64
 import contextlib
 import functools
 import json
+import logging
 import mimetypes
+import re
 import site
 import sys
 from decimal import Decimal, InvalidOperation
@@ -88,6 +90,49 @@ if hosted.hosted_enabled():
     register_pages(mcp, uploads_enabled=_uploads is not None)
 else:
     mcp = FastMCP("qcdatabase")
+
+
+class _RedactTotpCode(logging.Filter):
+    """Blank the value of any ``totp_code`` argument / ``X-TOTP-Code`` header in
+    a log line. At DEBUG the MCP library logs incoming messages (the SSE
+    transport logs raw request bodies, tool arguments included); a sign-off
+    code must never land in a log."""
+
+    _PATTERN = re.compile(
+        r"""((?:totp_code|x-totp-code)['"]?\s*[:=]\s*['"]?)[^'",}\s)\]]+""", re.IGNORECASE
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            text = record.getMessage()
+        except Exception:
+            return True
+        if "totp" in text.lower():
+            record.msg = self._PATTERN.sub(r"\1[redacted]", text)
+            record.args = None
+        return True
+
+
+_TOTP_LOG_FILTER = _RedactTotpCode()
+# A logger's filters see only records logged on that exact logger (not its
+# children), so name each module that logs message bodies.
+for _logger_name in ("mcp.server.lowlevel.server", "mcp.server.sse",
+                     "mcp.server.streamable_http", "mcp.server.fastmcp.server",
+                     "mcp.server.fastmcp.tools.base", "httpx", "qcdatabase_mcp"):
+    logging.getLogger(_logger_name).addFilter(_TOTP_LOG_FILTER)
+
+# One sentence every 2FA-gated tool's description carries (and tests look for).
+_SIGNOFF_2FA_SENTENCE = (
+    "If the project requires 2FA for this sign-off, pass the user's current "
+    "authenticator code as totp_code (ask the user for it; one code per call)."
+)
+
+
+def _totp(totp_code: str | None) -> dict[str, str]:
+    """``totp_code`` as a client keyword only when one was given (the client
+    sends it as the X-TOTP-Code header; a blank argument sends nothing)."""
+    return {"totp_code": totp_code} if totp_code and str(totp_code).strip() else {}
+
 
 def _tool(title: str, *, read_only: bool = False, destructive: bool = False,
           idempotent: bool = False, **kwargs: Any):
@@ -1552,7 +1597,9 @@ def list_documents(
 
 @_tool('Upload Document')
 @_safe
-def upload_document(file_path: str, folder_id: str = "", do_not_extract: bool = False) -> str:
+def upload_document(
+    file_path: str, folder_id: str = "", do_not_extract: bool = False, totp_code: str | None = None
+) -> str:
     """Upload a record (MTR, NDE report, certificate, procedure, etc.) to the
     current project. Optionally file it under a document folder id (recommended,
     so the right extraction schema runs). Set do_not_extract=True if you will
@@ -1563,7 +1610,14 @@ def upload_document(file_path: str, folder_id: str = "", do_not_extract: bool = 
     (item_type='documents') to look it up by name. If a match exists, ask the
     user whether to upload it as a new version with 'upload_document_version'
     (which archives the old file and its extracted data) rather than creating a
-    duplicate document."""
+    duplicate document.
+
+    Uploading a file with the same name as an existing document in the folder
+    becomes a new version of it.
+
+    Replacing the file of a record whose extracted data a person has audited
+    overwrites signed-off data. If the project requires 2FA for this sign-off, pass the user's current
+    authenticator code as totp_code (ask the user for it; one code per call)."""
     pid = require_project()
     name, fh, ctype = _open_file(file_path)
     try:
@@ -1576,6 +1630,7 @@ def upload_document(file_path: str, folder_id: str = "", do_not_extract: bool = 
             f"/api/documents/projects/{pid}/upload/",
             files=[("files", (name, fh, ctype))],
             data=data,
+            **_totp(totp_code),
         )
     finally:
         fh.close()
@@ -1591,23 +1646,37 @@ def get_document(document_id: str) -> str:
 
 @_tool('Set Document Extracted Data', destructive=True, idempotent=True)
 @_safe
-def set_document_extracted_data(document_id: str, extracted_data: str) -> str:
+def set_document_extracted_data(
+    document_id: str, extracted_data: str, totp_code: str | None = None
+) -> str:
     """Write structured fields back onto a document (used after you run your own
     'bring your own AI' extraction). 'extracted_data' is a JSON object string
     matching the folder's schema - call 'list_document_folders' to see each
-    folder's extraction schema (the field names to use as keys here)."""
+    folder's extraction schema (the field names to use as keys here).
+
+    Saving over data that a person has audited clears that human-audit sign-off.
+    If the project requires 2FA for this sign-off, pass the user's current
+    authenticator code as totp_code (ask the user for it; one code per call)."""
     payload = {"extracted_data": _parse_json_arg("extracted_data", extracted_data)}
-    result = client().post(f"/api/documents/{document_id}/extracted-data/", json=payload)
+    result = client().post(
+        f"/api/documents/{document_id}/extracted-data/", json=payload, **_totp(totp_code)
+    )
     return f"Extracted data saved on document {document_id}.\n\n{_pretty(result)}"
 
 
 @_tool('Upload Document Version')
 @_safe
-def upload_document_version(document_id: str, file_path: str, do_not_extract: bool = False) -> str:
+def upload_document_version(
+    document_id: str, file_path: str, do_not_extract: bool = False, totp_code: str | None = None
+) -> str:
     """Upload a new revision of an existing document. The current file and its
     extracted data are archived as a prior version and the new file is swapped in.
     Set do_not_extract=True to skip server-side extraction and supply your own
-    data afterwards with 'set_document_extracted_data'."""
+    data afterwards with 'set_document_extracted_data'.
+
+    Replacing the file of a record whose extracted data a person has audited
+    overwrites signed-off data. If the project requires 2FA for this sign-off, pass the user's current
+    authenticator code as totp_code (ask the user for it; one code per call)."""
     pid = require_project()
     name, fh, ctype = _open_file(file_path)
     try:
@@ -1616,6 +1685,7 @@ def upload_document_version(document_id: str, file_path: str, do_not_extract: bo
             f"/api/documents/projects/{pid}/document/{document_id}/version/",
             files=[("file", (name, fh, ctype))],
             data=data,
+            **_totp(totp_code),
         )
     finally:
         fh.close()
@@ -1665,7 +1735,7 @@ def _document_ids_arg(raw: Any) -> list[str]:
 
 @_tool('Delete Document', destructive=True)
 @_safe
-def delete_document(document_id: str) -> str:
+def delete_document(document_id: str, totp_code: str | None = None) -> str:
     """Delete (archive) one document. This is a SOFT delete: the document
     leaves lists and lookups, but its file, versions, extracted data, history
     and references are kept, and 'restore_document' brings it back. Confirm with
@@ -1673,8 +1743,12 @@ def delete_document(document_id: str) -> str:
 
     Do not use this to replace a file with a newer revision; use
     'upload_document_version'. Needs project membership; a Viewer / Field member
-    also needs the Delete permission on the document's folder."""
-    client().delete(f"/api/documents/{document_id}/")
+    also needs the Delete permission on the document's folder.
+
+    Deleting a document whose extracted data a person has audited removes that
+    sign-off from the live project. If the project requires 2FA for this sign-off, pass the
+    user's current authenticator code as totp_code (ask the user for it; one code per call)."""
+    client().delete(f"/api/documents/{document_id}/", **_totp(totp_code))
     return (
         f"Document {document_id} deleted (archived: hidden from lists, kept on record; "
         "'restore_document' brings it back)."
@@ -1683,7 +1757,7 @@ def delete_document(document_id: str) -> str:
 
 @_tool('Bulk Delete Documents', destructive=True)
 @_safe
-def bulk_delete_documents(document_ids: str) -> str:
+def bulk_delete_documents(document_ids: str, totp_code: str | None = None) -> str:
     """Delete (archive) up to 200 documents of the current project in one call.
     'document_ids' is a comma-separated list (or JSON array) of document ids.
     All or nothing: if any id is not a live document in this project, or you
@@ -1693,10 +1767,17 @@ def bulk_delete_documents(document_ids: str) -> str:
     data, history and references are kept, and 'bulk_restore_documents' brings
     them back. Confirm the list with the user first. Needs project membership;
     a Viewer / Field member also needs the Delete permission on every document's
-    folder."""
+    folder.
+
+    Deleting documents whose extracted data a person has audited removes those
+    sign-offs from the live project. If the project requires 2FA for this sign-off, pass the
+    user's current authenticator code as totp_code (ask the user for it; one code per call).
+    One code covers the whole batch."""
     pid = require_project()
     ids = _document_ids_arg(document_ids)
-    result = client().post("/api/documents/bulk-delete/", json={"project": pid, "ids": ids})
+    result = client().post(
+        "/api/documents/bulk-delete/", json={"project": pid, "ids": ids}, **_totp(totp_code)
+    )
     count = result.get("deleted", len(ids)) if isinstance(result, dict) else len(ids)
     return f"Deleted (archived) {count} document(s). They can be restored with 'bulk_restore_documents'."
 
@@ -1821,6 +1902,7 @@ def update_drawing(
     line_number: Optional[str] = None,
     sheet_number: Optional[str] = None,
     revision: Optional[str] = None,
+    totp_code: str | None = None,
 ) -> str:
     """Update identifying metadata on a drawing record in the active project.
 
@@ -1832,6 +1914,10 @@ def update_drawing(
     Omit a field to leave it unchanged. An empty drawing_number, line_number, or
     sheet_number clears that field. Title and revision must be nonblank when
     supplied.
+
+    Changing these values on a drawing whose extracted data a person has audited
+    alters signed-off data. If the project requires 2FA for this sign-off, pass
+    the user's current authenticator code as totp_code (ask the user for it; one code per call).
     """
     pid = require_project()
     payload: dict[str, str] = {}
@@ -1880,7 +1966,7 @@ def update_drawing(
             f"project {pid}; refusing to update it."
         )
 
-    result = c.patch(f"/api/drawings/{drawing_id}/", json=payload)
+    result = c.patch(f"/api/drawings/{drawing_id}/", json=payload, **_totp(totp_code))
     return f"Drawing {drawing_id} updated.\n\n{_pretty(result)}"
 
 
@@ -2023,10 +2109,16 @@ def upload_drawing_to_package(package_id: str, file_path: str, do_not_extract: b
 
 @_tool('Upload Drawing Version')
 @_safe
-def upload_drawing_version(drawing_id: str, file_path: str, do_not_extract: bool = False) -> str:
+def upload_drawing_version(
+    drawing_id: str, file_path: str, do_not_extract: bool = False, totp_code: str | None = None
+) -> str:
     """Upload a new revision of an existing drawing (a single-page PDF or image).
     The current image and its data are archived as a prior version and the new
-    file is swapped in. Set do_not_extract=True to skip server-side extraction."""
+    file is swapped in. Set do_not_extract=True to skip server-side extraction.
+
+    Replacing the file of a record whose extracted data a person has audited
+    overwrites signed-off data. If the project requires 2FA for this sign-off, pass the user's current
+    authenticator code as totp_code (ask the user for it; one code per call)."""
     pid = require_project()
     name, fh, ctype = _open_file(file_path)
     try:
@@ -2035,6 +2127,7 @@ def upload_drawing_version(drawing_id: str, file_path: str, do_not_extract: bool
             f"/api/drawings/projects/{pid}/drawing/{drawing_id}/version/",
             files=[("file", (name, fh, ctype))],
             data=data,
+            **_totp(totp_code),
         )
     finally:
         fh.close()
@@ -2043,10 +2136,16 @@ def upload_drawing_version(drawing_id: str, file_path: str, do_not_extract: bool
 
 @_tool('Upload Large Format Drawing Version')
 @_safe
-def upload_large_format_drawing_version(lfd_id: str, file_path: str, do_not_extract: bool = False) -> str:
+def upload_large_format_drawing_version(
+    lfd_id: str, file_path: str, do_not_extract: bool = False, totp_code: str | None = None
+) -> str:
     """Upload a new revision of an existing large-format drawing. The current file
     and its data are archived as a prior version. Set do_not_extract=True to skip
-    server-side extraction."""
+    server-side extraction.
+
+    A new revision clears a human-audit sign-off on the current data.
+    If the project requires 2FA for this sign-off, pass the user's current
+    authenticator code as totp_code (ask the user for it; one code per call)."""
     pid = require_project()
     name, fh, ctype = _open_file(file_path)
     try:
@@ -2055,6 +2154,7 @@ def upload_large_format_drawing_version(lfd_id: str, file_path: str, do_not_extr
             f"/api/drawings/projects/{pid}/large-format/{lfd_id}/version/",
             files=[("file", (name, fh, ctype))],
             data=data,
+            **_totp(totp_code),
         )
     finally:
         fh.close()
@@ -2348,6 +2448,7 @@ def update_map_item(
     status: str = "",
     bim_component_id: str = "",
     clear: str = "",
+    totp_code: str | None = None,
 ) -> str:
     """Update one map item: rename it, move it on its drawing, rotate its flag,
     change its sheet, edit notes, (re)assign it, set a working status, or link a
@@ -2371,7 +2472,12 @@ def update_map_item(
     Confirm changes to signed-off items with the user and check the returned
     status. An item under an active lock (quality hold, see 'add_lock') cannot
     be edited or deleted until the lock is cleared; the API rejects the call
-    with the lock message."""
+    with the lock message.
+
+    Setting a working status on a completed/accepted item removes that
+    sign-off, so it counts as a sign-off action. If the project requires 2FA
+    for this sign-off, pass the user's current authenticator code as totp_code
+    (ask the user for it; one code per call)."""
     payload = _update_payload(
         {"label": label, "x_position": x_position, "y_position": y_position,
          "x_position_2": x_position_2, "y_position_2": y_position_2,
@@ -2407,7 +2513,7 @@ def update_map_item(
         project = project.get("id")
     if not project or str(project) != str(pid):
         raise ValueError("Map item does not have a verified active-project membership.")
-    result = c.patch(f"/api/mapping/items/{item_id}/", json=payload)
+    result = c.patch(f"/api/mapping/items/{item_id}/", json=payload, **_totp(totp_code))
     return f"Map item {item_id} updated.\n\n{_pretty(result)}"
 
 
@@ -2469,7 +2575,9 @@ def bulk_create_map_items(drawing_id: str, schema_id: str, items: str) -> str:
 
 @_tool('Bulk Update Map Items', destructive=True)
 @_safe
-def bulk_update_map_items(drawing_id: str, schema_id: str, items: str) -> str:
+def bulk_update_map_items(
+    drawing_id: str, schema_id: str, items: str, totp_code: str | None = None
+) -> str:
     """Edit the schema DATA fields of many existing map items on ONE drawing in a
     single request (up to 500). Every item must belong to the given drawing and
     schema, so drawing_id and schema_id are given once here, never per item. The
@@ -2488,7 +2596,10 @@ def bulk_update_map_items(drawing_id: str, schema_id: str, items: str) -> str:
     HEADS UP: editing an item's QC content VOIDS any prior complete/accepted
     sign-off on it - those items reset to pending and the response lists their ids
     under 'buyoff_cleared'. Confirm with the user before re-editing already-signed-
-    off items.
+    off items. Voiding a sign-off this way counts as undoing it. If the project
+    requires 2FA for this sign-off, pass the user's current authenticator code
+    as totp_code (ask the user for it; one code per call). One code covers the
+    whole batch.
 
     'items' is a JSON array of objects, each with:
       - id    (required) the existing map item's id
@@ -2506,7 +2617,7 @@ def bulk_update_map_items(drawing_id: str, schema_id: str, items: str) -> str:
         "schema": schema_id,
         "items": parsed,
     }
-    result = client().post("/api/mapping/items/bulk-update/", json=payload)
+    result = client().post("/api/mapping/items/bulk-update/", json=payload, **_totp(totp_code))
     updated = result.get("updated") if isinstance(result, dict) else None
     count = updated if updated is not None else len(parsed)
     msg = f"Bulk-updated {count} map item(s) on drawing {drawing_id}."
@@ -2522,11 +2633,15 @@ def bulk_update_map_items(drawing_id: str, schema_id: str, items: str) -> str:
 
 @_tool('Mark Map Item Complete', destructive=True, idempotent=True)
 @_safe
-def mark_map_item_complete(item_id: str) -> str:
+def mark_map_item_complete(item_id: str, totp_code: str | None = None) -> str:
     """Mark a map item complete. This is a buy-off recorded under YOUR name and
     the current time. Only do this when the user has confirmed the work is done -
-    the user is responsible for this sign-off."""
-    result = client().post(f"/api/mapping/items/{item_id}/mark-complete/")
+    the user is responsible for this sign-off. For several items use
+    'bulk_mark_map_items_complete' (one request, one 2FA code).
+
+    If the project requires 2FA for this sign-off, pass the user's current
+    authenticator code as totp_code (ask the user for it; one code per call)."""
+    result = client().post(f"/api/mapping/items/{item_id}/mark-complete/", **_totp(totp_code))
     return (
         f"Map item {item_id} marked complete (recorded as your sign-off).\n\n{_pretty(result)}"
     )
@@ -2534,14 +2649,151 @@ def mark_map_item_complete(item_id: str) -> str:
 
 @_tool('Mark Map Item Accepted', destructive=True, idempotent=True)
 @_safe
-def mark_map_item_accepted(item_id: str) -> str:
+def mark_map_item_accepted(item_id: str, totp_code: str | None = None) -> str:
     """Mark a map item accepted (must already be complete). This is a buy-off
     recorded under YOUR name. Only do this with the user's explicit go-ahead -
-    the user is accountable for the acceptance."""
-    result = client().post(f"/api/mapping/items/{item_id}/mark-accepted/")
+    the user is accountable for the acceptance. For several items use
+    'bulk_mark_map_items_accepted' (one request, one 2FA code).
+
+    If the project requires 2FA for this sign-off, pass the user's current
+    authenticator code as totp_code (ask the user for it; one code per call)."""
+    result = client().post(f"/api/mapping/items/{item_id}/mark-accepted/", **_totp(totp_code))
     return (
         f"Map item {item_id} marked accepted (recorded as your sign-off).\n\n{_pretty(result)}"
     )
+
+
+# Batch sign-offs. A project that requires 2FA for a sign-off accepts at most
+# one gated request per 30-second authenticator step per user, and a code is
+# consumed by the request it authorises - so a run of sign-offs has to be ONE
+# request. These tools call the API's batch routes; the single-item tools above
+# stay as they are.
+_BULK_MAP_MAX = 500
+_BULK_ITP_MAX = 500
+_BULK_SHIPPER_MAX = 500
+
+
+def _bulk_ids(name: str, raw: Any, limit: int) -> list[str]:
+    ids = _ids_arg(name, raw)
+    if len(ids) > limit:
+        raise ValueError(
+            f"At most {limit} ids per call (got {len(ids)}). Split the batch; each call "
+            "needs its own authenticator code when the project requires 2FA."
+        )
+    return ids
+
+
+_MAP_SKIP_REASONS = {
+    "not_found": "not found (missing, deleted, or not in this project)",
+    "permission_denied": "no sign-off permission for this item type",
+    "training_required": "a required training is missing or expired",
+    "locked": "an active lock (quality hold) must be unlocked first",
+    "open_reference_requests": "open reference requests must be fulfilled or cancelled first",
+    "not_completed": "not complete, and you may not complete this item type",
+}
+
+
+def _bulk_map_summary(verb: str, requested: list[str], result: Any) -> str:
+    """Per-item outcome of a bulk-mark-complete / bulk-mark-accepted call."""
+    if not isinstance(result, dict):
+        return f"{verb}: {_pretty(result)}"
+    rows = [r for r in (result.get("items") or []) if isinstance(r, dict)]
+    changed = {str(r.get("id")).lower(): r for r in rows}
+    updated = result.get("updated", len(rows))
+    lines = [f"{verb}: {updated} of {len(requested)} map item(s) changed."]
+    has_detail = "skipped" in result or "unchanged" in result
+    skipped = {str(s.get("id")).lower(): s for s in (result.get("skipped") or []) if isinstance(s, dict)}
+    unchanged = {str(u).lower() for u in (result.get("unchanged") or [])}
+    not_changed = []
+    for item_id in requested:
+        key = item_id.lower()
+        row = changed.get(key)
+        if row is not None:
+            lines.append(f"- {item_id}: changed (status {row.get('status')})")
+        elif key in skipped:
+            reason = str(skipped[key].get("reason") or "")
+            lines.append(f"- {item_id}: skipped - {_MAP_SKIP_REASONS.get(reason, reason or 'not changed')}")
+        elif key in unchanged:
+            lines.append(f"- {item_id}: unchanged (already in that state)")
+        elif has_detail:
+            lines.append(f"- {item_id}: not reported by the API")
+        else:
+            not_changed.append(item_id)
+    if not_changed:  # an older server without per-item skipped / unchanged
+        lines.append(
+            f"Not changed ({len(not_changed)}): {', '.join(not_changed)} - skipped by the "
+            "API (missing id, no permission for its type, training required, active "
+            "lock, open reference request, or accept on an item you may not complete)."
+        )
+    for key, label in (("blocked_count", "blocked by a lock or open reference request"),
+                       ("permission_blocked", "skipped: no sign-off permission for the item type"),
+                       ("training_blocked", "skipped: training required")):
+        if result.get(key):
+            lines.append(f"{label}: {result[key]}")
+    if result.get("message"):
+        lines.append(str(result["message"]))
+    return "\n".join(lines)
+
+
+@_tool('Bulk Mark Map Items Complete', destructive=True, idempotent=True)
+@_safe
+def bulk_mark_map_items_complete(
+    item_ids: str, undo: bool = False, totp_code: str | None = None
+) -> str:
+    """Mark many map items complete in ONE request (up to 500), e.g. every weld
+    the user has confirmed on a drawing. Each is a buy-off recorded under YOUR
+    name and the current time, exactly like 'mark_map_item_complete'. Confirm
+    the full list with the user first - the user is responsible for every
+    sign-off in it.
+
+    'item_ids' is comma-separated ids or a JSON array. Items may be on several
+    drawings but must all be in one project. With undo=true the completion
+    (and any acceptance) is removed instead - only on the user's explicit
+    request. Items the API cannot change (no permission for the type, training
+    required, active lock, open reference request, missing) are skipped and
+    listed; the result shows the outcome per item.
+
+    If the project requires 2FA for this sign-off, pass the user's current
+    authenticator code as totp_code (ask the user for it; one code per call).
+    One code covers the whole batch; if it is missing or wrong nothing is
+    written."""
+    ids = _bulk_ids("item_ids", item_ids, _BULK_MAP_MAX)
+    result = client().post(
+        "/api/mapping/items/bulk-mark-complete/",
+        json={"items": ids, "undo": bool(undo)}, **_totp(totp_code),
+    )
+    verb = "Undo complete" if undo else "Marked complete (recorded as your sign-off)"
+    return f"{_bulk_map_summary(verb, ids, result)}\n\n{_pretty(result)}"
+
+
+@_tool('Bulk Mark Map Items Accepted', destructive=True, idempotent=True)
+@_safe
+def bulk_mark_map_items_accepted(
+    item_ids: str, undo: bool = False, totp_code: str | None = None
+) -> str:
+    """Mark many map items accepted in ONE request (up to 500). Each is a
+    buy-off recorded under YOUR name, exactly like 'mark_map_item_accepted'.
+    Only with the user's explicit go-ahead for the full list - the user is
+    accountable for every acceptance in it. An item not yet complete is
+    completed and accepted in one step when you may also complete its type,
+    and skipped otherwise.
+
+    'item_ids' is comma-separated ids or a JSON array, all in one project. With
+    undo=true the acceptance is removed instead (the completion stays) - only
+    on the user's explicit request. Skipped items are listed; the result shows
+    the outcome per item.
+
+    If the project requires 2FA for this sign-off, pass the user's current
+    authenticator code as totp_code (ask the user for it; one code per call).
+    One code covers the whole batch; if it is missing or wrong nothing is
+    written."""
+    ids = _bulk_ids("item_ids", item_ids, _BULK_MAP_MAX)
+    result = client().post(
+        "/api/mapping/items/bulk-mark-accepted/",
+        json={"items": ids, "undo": bool(undo)}, **_totp(totp_code),
+    )
+    verb = "Undo accept" if undo else "Marked accepted (recorded as your sign-off)"
+    return f"{_bulk_map_summary(verb, ids, result)}\n\n{_pretty(result)}"
 
 
 @_tool('List Repair Codes', read_only=True)
@@ -2724,6 +2976,7 @@ def upload_zipmap(
     mode: str = "append",
     schema_ids: str = "",
     extracted_data: str = "",
+    totp_code: str | None = None,
 ) -> str:
     """Upload a zipmap - a whole mapped drawing (image + PDF + every map item on it)
     in ONE transactional request. This is the streamlined way to bring in a weld map
@@ -2756,7 +3009,10 @@ def upload_zipmap(
     number, so re-sending a corrected map does not leave a duplicate behind. The
     replaced drawing is retained in the audit trail, but it stops appearing in
     drawing lists - and its map items go with it. Use 'replace' only when the user
-    has asked to supersede that drawing.
+    has asked to supersede that drawing. Replacing a drawing that carries completed
+    or accepted map items, or a human-audit stamp, removes those sign-offs from the
+    live project. If the project requires 2FA for this sign-off, pass the user's current
+    authenticator code as totp_code (ask the user for it; one code per call).
 
     'extracted_data' optionally overrides the archive's extracted_data.json with a
     JSON object of drawing-level extraction (bill of materials, line number, ...).
@@ -2822,6 +3078,7 @@ def upload_zipmap(
         # builds all of it in a single transaction - well past the default read
         # timeout for a big map.
         timeout=_ZIPMAP_TIMEOUT,
+        **_totp(totp_code),
     )
     return _render_zipmap_result(result, picked)
 
@@ -2873,12 +3130,17 @@ def submit_fillable_template(
     file_path: str,
     file_name: str = "",
     do_not_extract: bool = False,
+    totp_code: str | None = None,
 ) -> str:
     """Submit a filled PDF back into a template's folder as a document. Re-using a
     file_name creates a new version of that document. Set do_not_extract=True if
     you will supply the extracted JSON yourself. Note: filling the PDF stores the
     signed record; to also populate structured fields, follow up with
-    'set_document_extracted_data' on the returned document."""
+    'set_document_extracted_data' on the returned document.
+
+    Replacing the file of a record whose extracted data a person has audited
+    overwrites signed-off data. If the project requires 2FA for this sign-off, pass the user's current
+    authenticator code as totp_code (ask the user for it; one code per call)."""
     pid = require_project()
     name, fh, ctype = _open_file(file_path)
     try:
@@ -2891,6 +3153,7 @@ def submit_fillable_template(
             f"/api/documents/projects/{pid}/fillable-templates/{folder_id}/submit/",
             files=[("filled_pdf", (name, fh, ctype))],
             data=data,
+            **_totp(totp_code),
         )
     finally:
         fh.close()
@@ -2926,7 +3189,8 @@ def create_form_submission(
     'list_form_schemas' first to read that schema's field definitions, then pass
     'data' as an (optional) JSON object of initial field values keyed by those
     fields. It is created as a draft; use 'complete_form_submission' to lock it
-    once finished."""
+    once finished. (Drafts are never 2FA-gated, so this tool takes no
+    totp_code.)"""
     pid = require_project()
     payload: dict[str, Any] = {"form_schema": form_schema}
     if title:
@@ -2977,12 +3241,17 @@ def update_form_submission(
 
 @_tool('Complete Form Submission', destructive=True, idempotent=True)
 @_safe
-def complete_form_submission(submission_id: str) -> str:
+def complete_form_submission(submission_id: str, totp_code: str | None = None) -> str:
     """Mark a form submission complete. Completed forms are evidence that can
     satisfy reference requests. This locks the submission - only do it when the
-    user confirms the form is finished."""
+    user confirms the form is finished.
+
+    If the project requires 2FA for this sign-off, pass the user's current
+    authenticator code as totp_code (ask the user for it; one code per call)."""
     pid = require_project()
-    result = client().post(f"/api/forms/projects/{pid}/submissions/{submission_id}/complete/")
+    result = client().post(
+        f"/api/forms/projects/{pid}/submissions/{submission_id}/complete/", **_totp(totp_code)
+    )
     return f"Form submission {submission_id} completed.\n\n{_pretty(result)}"
 
 
@@ -3200,23 +3469,116 @@ def update_itp_line_item(
 
 @_tool('Mark ITP Complete', destructive=True, idempotent=True)
 @_safe
-def mark_itp_complete(item_id: str) -> str:
+def mark_itp_complete(item_id: str, totp_code: str | None = None) -> str:
     """Mark an ITP line item complete. This is a buy-off recorded under YOUR name.
     Only do this when the user confirms the activity is done - the user is
-    responsible for the sign-off."""
+    responsible for the sign-off. For several lines use 'bulk_mark_itp_complete'
+    (one request, one 2FA code).
+
+    If the project requires 2FA for this sign-off, pass the user's current
+    authenticator code as totp_code (ask the user for it; one code per call)."""
     pid = require_project()
-    result = client().post(f"/api/packages/projects/{pid}/itp-line-items/{item_id}/mark-complete/")
+    result = client().post(
+        f"/api/packages/projects/{pid}/itp-line-items/{item_id}/mark-complete/", **_totp(totp_code)
+    )
     return f"ITP line item {item_id} marked complete (recorded as your sign-off).\n\n{_pretty(result)}"
 
 
 @_tool('Mark ITP Accepted', destructive=True, idempotent=True)
 @_safe
-def mark_itp_accepted(item_id: str) -> str:
+def mark_itp_accepted(item_id: str, totp_code: str | None = None) -> str:
     """Mark an ITP line item accepted (must already be complete). This is a buy-off
-    recorded under YOUR name. Only do this with the user's explicit go-ahead."""
+    recorded under YOUR name. Only do this with the user's explicit go-ahead.
+    For several lines use 'bulk_mark_itp_accepted' (one request, one 2FA code).
+
+    If the project requires 2FA for this sign-off, pass the user's current
+    authenticator code as totp_code (ask the user for it; one code per call)."""
     pid = require_project()
-    result = client().post(f"/api/packages/projects/{pid}/itp-line-items/{item_id}/mark-accepted/")
+    result = client().post(
+        f"/api/packages/projects/{pid}/itp-line-items/{item_id}/mark-accepted/", **_totp(totp_code)
+    )
     return f"ITP line item {item_id} marked accepted (recorded as your sign-off).\n\n{_pretty(result)}"
+
+
+def _bulk_itp_summary(verb: str, requested: list[str], result: Any) -> str:
+    """Per-item outcome of an ITP bulk-mark call: changed, skipped (with the
+    API's reason) and unchanged (already in the requested state)."""
+    if not isinstance(result, dict):
+        return f"{verb}: {_pretty(result)}"
+    changed = {str(r.get("id")).lower() for r in (result.get("items") or []) if isinstance(r, dict)}
+    skipped = {str(s.get("id")).lower(): s for s in (result.get("skipped") or []) if isinstance(s, dict)}
+    unchanged = {str(u).lower() for u in (result.get("unchanged") or [])}
+    lines = [f"{verb}: {result.get('updated', len(changed))} of {len(requested)} ITP line item(s) changed."]
+    for item_id in requested:
+        key = item_id.lower()
+        if key in changed:
+            lines.append(f"- {item_id}: changed")
+        elif key in skipped:
+            s = skipped[key]
+            label = f" ({s['label']})" if s.get("label") else ""
+            lines.append(f"- {item_id}{label}: skipped - {s.get('error') or s.get('status') or 'blocked'}")
+        elif key in unchanged:
+            lines.append(f"- {item_id}: unchanged (already in that state)")
+        else:
+            lines.append(f"- {item_id}: not reported by the API")
+    return "\n".join(lines)
+
+
+def _bulk_itp(action: str, item_ids: Any, undo: bool, totp_code: str | None) -> str:
+    ids = _bulk_ids("item_ids", item_ids, _BULK_ITP_MAX)
+    pid = require_project()
+    result = client().post(
+        f"/api/packages/projects/{pid}/itp-line-items/bulk-mark-{action}/",
+        json={"items": ids, "undo": bool(undo)}, **_totp(totp_code),
+    )
+    if undo:
+        verb = f"Undo {'complete' if action == 'complete' else 'accept'}"
+    else:
+        verb = f"Marked {action} (recorded as your sign-off)"
+    return f"{_bulk_itp_summary(verb, ids, result)}\n\n{_pretty(result)}"
+
+
+@_tool('Bulk Mark ITP Complete', destructive=True, idempotent=True)
+@_safe
+def bulk_mark_itp_complete(item_ids: str, undo: bool = False, totp_code: str | None = None) -> str:
+    """Mark many ITP line items of the current project complete in ONE request
+    (up to 500). Each is a buy-off recorded under YOUR name, exactly like
+    'mark_itp_complete'. Confirm the full list with the user first - the user is
+    responsible for every sign-off in it.
+
+    'item_ids' is comma-separated ids or a JSON array; every id must be a line
+    of this project, else nothing is written. With undo=true the completion
+    (and any acceptance) is removed instead - only on the user's explicit
+    request. The result lists each line as changed, skipped (lock, open
+    reference request, missing required photo - with the reason) or unchanged
+    (already complete).
+
+    If the project requires 2FA for this sign-off, pass the user's current
+    authenticator code as totp_code (ask the user for it; one code per call).
+    One code covers the whole batch; if it is missing or wrong nothing is
+    written."""
+    return _bulk_itp("complete", item_ids, undo, totp_code)
+
+
+@_tool('Bulk Mark ITP Accepted', destructive=True, idempotent=True)
+@_safe
+def bulk_mark_itp_accepted(item_ids: str, undo: bool = False, totp_code: str | None = None) -> str:
+    """Mark many ITP line items of the current project accepted in ONE request
+    (up to 500). Each is a buy-off recorded under YOUR name, exactly like
+    'mark_itp_accepted'. Only with the user's explicit go-ahead for the full
+    list.
+
+    'item_ids' is comma-separated ids or a JSON array; every id must be a line
+    of this project, else nothing is written. Lines not yet complete are
+    skipped. With undo=true the acceptance is removed instead - only on the
+    user's explicit request. The result lists each line as changed, skipped
+    (with the reason) or unchanged (already accepted).
+
+    If the project requires 2FA for this sign-off, pass the user's current
+    authenticator code as totp_code (ask the user for it; one code per call).
+    One code covers the whole batch; if it is missing or wrong nothing is
+    written."""
+    return _bulk_itp("accepted", item_ids, undo, totp_code)
 
 
 # ===========================================================================
@@ -3399,7 +3761,7 @@ def add_lock(
 
 @_tool('Unlock Lock', destructive=True)
 @_safe
-def unlock_lock(lock_id: str) -> str:
+def unlock_lock(lock_id: str, totp_code: str | None = None) -> str:
     """Clear the hold on a quality-hold lock (mark it unlocked) - i.e. record that
     the required inspection/witness point has been satisfied. This releases the
     restriction so the held item can be turned in, UNLESS another lock of a
@@ -3412,9 +3774,12 @@ def unlock_lock(lock_id: str) -> str:
     happened. Do it ONLY when the lock's owner/author or the assigned inspector has
     explicitly confirmed the hold point is cleared - never to unblock work so an
     item can be turned in. Only a currently-locked lock can be unlocked, and only if
-    the API permits you (see can_unlock on 'get_lock')."""
+    the API permits you (see can_unlock on 'get_lock').
+
+    If the project requires 2FA for this sign-off, pass the user's current
+    authenticator code as totp_code (ask the user for it; one code per call)."""
     pid = require_project()
-    result = client().post(f"/api/locks/projects/{pid}/locks/{lock_id}/unlock/")
+    result = client().post(f"/api/locks/projects/{pid}/locks/{lock_id}/unlock/", **_totp(totp_code))
     return (
         f"Lock {lock_id} unlocked (hold cleared; the record is kept as part of the "
         f"quality history).\n{_LOCK_OWNER_REMINDER}\n\n{_pretty(result)}"
@@ -3449,7 +3814,7 @@ def assign_lock(lock_id: str, assigned_to: str = "", assigned_user_type: str = "
 
 @_tool('Delete Lock', destructive=True)
 @_safe
-def delete_lock(lock_id: str) -> str:
+def delete_lock(lock_id: str, totp_code: str | None = None) -> str:
     """Withdraw a quality-hold lock. This is a SOFT delete: the lock is stamped with
     who removed it and when, and kept in the audit trail, but it stops appearing as a
     lock on the item and frees its type so the same hold can be placed there again.
@@ -3463,14 +3828,91 @@ def delete_lock(lock_id: str) -> str:
     Taking down someone's witness point is their call, so do it ONLY when the lock's
     owner/author or a lock admin explicitly asks. Never withdraw someone else's hold
     to unblock or turn in work. Only allowed if the API permits you (see can_delete on
-    'get_lock')."""
+    'get_lock').
+
+    If the project requires 2FA for this sign-off, pass the user's current
+    authenticator code as totp_code (ask the user for it; one code per call)."""
     pid = require_project()
-    client().delete(f"/api/locks/projects/{pid}/locks/{lock_id}/")
+    client().delete(f"/api/locks/projects/{pid}/locks/{lock_id}/", **_totp(totp_code))
     return (
         f"Lock {lock_id} withdrawn (soft-deleted: kept in the audit trail with who "
         "removed it, no longer holding the item; its type can be placed again).\n"
         f"{_LOCK_OWNER_REMINDER}"
     )
+
+
+_BULK_LOCK_MAX = 500
+_LOCK_SKIP_REASONS = {
+    "not_found": "not found in this project (or already deleted)",
+    "already_unlocked": "already unlocked",
+    "permission_denied": "you may not do this to this lock",
+    "training_required": "a required training is missing or expired",
+}
+
+
+def _bulk_locks(action: str, lock_ids: Any, totp_code: str | None) -> str:
+    ids = _bulk_ids("lock_ids", lock_ids, _BULK_LOCK_MAX)
+    pid = require_project()
+    result = client().post(
+        f"/api/locks/projects/{pid}/locks/{action}/", json={"locks": ids}, **_totp(totp_code)
+    )
+    result = result if isinstance(result, dict) else {}
+    acted = {str(r.get("id")).lower(): r for r in (result.get("locks") or []) if isinstance(r, dict)}
+    skipped = {str(s.get("id")).lower(): s for s in (result.get("skipped") or []) if isinstance(s, dict)}
+    past = "unlocked" if action == "unlock" else "withdrawn (soft-deleted)"
+    lines = [f"{len(acted)} of {len(ids)} lock(s) {past}."]
+    for lock_id in ids:
+        key = lock_id.lower()
+        if key in acted:
+            lt = acted[key].get("lock_type")
+            name = f" ({lt.get('name')})" if isinstance(lt, dict) and lt.get("name") else ""
+            lines.append(f"- {lock_id}{name}: {past}")
+        elif key in skipped:
+            reason = str(skipped[key].get("reason") or "")
+            lines.append(f"- {lock_id}: skipped - {_LOCK_SKIP_REASONS.get(reason, reason or 'not changed')}")
+        else:
+            lines.append(f"- {lock_id}: not reported by the API")
+    return "\n".join(lines) + f"\n{_LOCK_OWNER_REMINDER}\n\n{_pretty(result)}"
+
+
+@_tool('Bulk Unlock Locks', destructive=True)
+@_safe
+def bulk_unlock_locks(lock_ids: str, totp_code: str | None = None) -> str:
+    """Clear the hold on several quality-hold locks of the current project in
+    ONE request (up to 500), with the same per-lock rules as 'unlock_lock'.
+    Each unlock is a verification sign-off asserting the inspection happened:
+    do it ONLY when the lock's owner/author or the assigned inspector has
+    explicitly confirmed every hold point in the list is cleared.
+
+    'lock_ids' is comma-separated ids or a JSON array. Locks that are missing,
+    already unlocked, not permitted or blocked by a training are skipped and
+    listed with the reason; the result shows the outcome per lock.
+
+    If the project requires 2FA for this sign-off, pass the user's current
+    authenticator code as totp_code (ask the user for it; one code per call).
+    One code covers the whole batch; if it is missing or wrong nothing is
+    written."""
+    return _bulk_locks("unlock", lock_ids, totp_code)
+
+
+@_tool('Bulk Delete Locks', destructive=True)
+@_safe
+def bulk_delete_locks(lock_ids: str, totp_code: str | None = None) -> str:
+    """Withdraw (soft-delete) several quality-hold locks of the current project
+    in ONE request (up to 500), with the same per-lock rules as 'delete_lock'.
+    Withdrawing says the holds should not have been there - use it to undo locks
+    placed in error, never to clear satisfied holds (unlock those). Do it ONLY
+    when the locks' owner/author or a lock admin explicitly asks.
+
+    'lock_ids' is comma-separated ids or a JSON array. Locks that are missing,
+    not permitted or blocked by a training are skipped and listed with the
+    reason; the result shows the outcome per lock.
+
+    If the project requires 2FA for this sign-off, pass the user's current
+    authenticator code as totp_code (ask the user for it; one code per call).
+    One code covers the whole batch; if it is missing or wrong nothing is
+    written."""
+    return _bulk_locks("delete", lock_ids, totp_code)
 
 
 # ===========================================================================
@@ -3853,7 +4295,7 @@ def update_shipper(
 
 @_tool('Set Shipper Status', destructive=True, idempotent=True)
 @_safe
-def set_shipper_status(shipper_id: str, status: str) -> str:
+def set_shipper_status(shipper_id: str, status: str, totp_code: str | None = None) -> str:
     """Move a shipper to another status, e.g. 'shipped'. The status must be one
     of the shipper's available_statuses (see 'get_shipper'; they come from its
     type, or draft / shipped / received when it has none).
@@ -3867,7 +4309,10 @@ def set_shipper_status(shipper_id: str, status: str) -> str:
     user before locking a shipper. Needs write
     access to the project: Project Admins, Managers and Inspectors have it; a
     Viewer / Field member only if their user type has the Shippers Edit
-    permission."""
+    permission.
+
+    If the project requires 2FA for this sign-off, pass the user's current
+    authenticator code as totp_code (ask the user for it; one code per call)."""
     status = (status or "").strip()
     if not status:
         raise ValueError("Supply a status. 'get_shipper' lists the shipper's available_statuses.")
@@ -3876,22 +4321,29 @@ def set_shipper_status(shipper_id: str, status: str) -> str:
             "Moving a shipper back to draft unlocks it: use 'unlock_shipper' for that."
         )
     pid = require_project()
-    result = client().patch(f"/api/shippers/projects/{pid}/{shipper_id}/", json={"status": status})
+    result = client().patch(
+        f"/api/shippers/projects/{pid}/{shipper_id}/", json={"status": status}, **_totp(totp_code)
+    )
     return f"Shipper {shipper_id} status set to '{status}' (locked).\n\n{_pretty(result)}"
 
 
 @_tool('Delete Shipper', destructive=True)
 @_safe
-def delete_shipper(shipper_id: str) -> str:
+def delete_shipper(shipper_id: str, totp_code: str | None = None) -> str:
     """Delete a shipper and its line items. Project admins only, as in the web
     app (other members get a 403).
 
     This is a SOFT delete: the shipper and its lines stop appearing, but the
     records are kept with who deleted them and when. The API refuses (409) a
     locked shipper (any status other than draft) and a shipper with any received
-    line item. Confirm with the user first."""
+    line item. Confirm with the user first.
+
+    Deleting a shipper that carries checklist confirmations removes those
+    sign-offs. If the project requires 2FA for this sign-off, pass the user's
+    current authenticator code as totp_code (ask the user for it; one code per
+    call)."""
     pid = require_project()
-    client().delete(f"/api/shippers/projects/{pid}/{shipper_id}/")
+    client().delete(f"/api/shippers/projects/{pid}/{shipper_id}/", **_totp(totp_code))
     return (
         f"Shipper {shipper_id} deleted (soft-deleted with its line items: hidden, kept "
         "on record with who deleted it)."
@@ -4006,7 +4458,7 @@ def _checklist_kind(kind: str) -> str:
 
 @_tool('Unlock Shipper', destructive=True, idempotent=True)
 @_safe
-def unlock_shipper(shipper_id: str) -> str:
+def unlock_shipper(shipper_id: str, totp_code: str | None = None) -> str:
     """Put a locked shipper (any status other than draft) back to draft, so its
     header and line items can be edited again; the web app's Unlock button.
     Checklist confirmations, received lines and notes are kept. Confirm with
@@ -4014,26 +4466,120 @@ def unlock_shipper(shipper_id: str) -> str:
 
     Needs write access to the project: Project Admins, Managers and
     Inspectors have it; a Viewer / Field member only if their user type has
-    the Shippers Edit permission."""
+    the Shippers Edit permission.
+
+    If the project requires 2FA for this sign-off, pass the user's current
+    authenticator code as totp_code (ask the user for it; one code per call)."""
     pid = require_project()
-    result = client().post(f"/api/shippers/projects/{pid}/{shipper_id}/unlock/")
+    result = client().post(f"/api/shippers/projects/{pid}/{shipper_id}/unlock/", **_totp(totp_code))
     return f"Shipper {shipper_id} unlocked (back to draft).\n\n{_pretty(result)}"
 
 
-def _set_checklist_item(shipper_id: str, kind: str, index: int, item: str, action: str) -> Any:
+def _set_checklist_item(
+    shipper_id: str, kind: str, index: int, item: str, action: str, totp_code: str | None = None
+) -> Any:
     kind = _checklist_kind(kind)
     if index is None or int(index) < 0:
         raise ValueError("'index' is the zero-based position of the item in the checklist.")
     pid = require_project()
     body = {"item": item} if item else {}
     return client().post(
-        f"/api/shippers/projects/{pid}/{shipper_id}/checklists/{kind}/{int(index)}/{action}/", json=body
+        f"/api/shippers/projects/{pid}/{shipper_id}/checklists/{kind}/{int(index)}/{action}/", json=body,
+        **_totp(totp_code),
     )
+
+
+def _checklist_indexes(raw: Any) -> list[int]:
+    parts = _ids_arg("indexes", raw)
+    try:
+        indexes = [int(p) for p in parts]
+    except ValueError:
+        raise ValueError("'indexes' must be zero-based whole numbers, e.g. '0,2,3' or [0, 2, 3].") from None
+    if any(i < 0 for i in indexes):
+        raise ValueError("'indexes' are zero-based positions in the checklist (no negatives).")
+    if len(indexes) > _BULK_SHIPPER_MAX:
+        raise ValueError(f"At most {_BULK_SHIPPER_MAX} indexes per call.")
+    return indexes
+
+
+def _bulk_checklist(
+    shipper_id: str, kind: str, indexes: Any, expected_items: str, action: str,
+    totp_code: str | None,
+) -> str:
+    kind = _checklist_kind(kind)
+    idx = _checklist_indexes(indexes)
+    body: dict[str, Any] = {"indexes": idx}
+    if expected_items and expected_items.strip():
+        expected = _parse_json_arg("expected_items", expected_items)
+        if not isinstance(expected, list) or len(expected) != len(idx) or not all(
+            isinstance(t, str) for t in expected
+        ):
+            raise ValueError(
+                "'expected_items' must be a JSON array of the item texts you read, one per "
+                "index and in the same order (or leave it blank)."
+            )
+        body["expected_items"] = expected
+    pid = require_project()
+    result = client().post(
+        f"/api/shippers/projects/{pid}/{shipper_id}/checklists/{kind}/{action}/",
+        json=body, **_totp(totp_code),
+    )
+    state = result.get(f"{kind}_checklist_state") if isinstance(result, dict) else None
+    state = state if isinstance(state, dict) else {}
+    verb = "Confirmed" if action == "confirm" else "Cleared"
+    lines = [f"{verb} {len(idx)} {kind} checklist item(s) on shipper {shipper_id} (all or nothing):"]
+    changed = _changed_indexes(result)
+    for i in idx:
+        entry = state.get(str(i), state.get(i)) if state else None
+        if changed is None:
+            note = ""
+        elif i in changed:
+            note = " (changed by this request)"
+        else:
+            note = " (unchanged: already in that state)"
+        if isinstance(entry, dict) and entry.get("checked"):
+            who = entry.get("user") or "?"
+            when = entry.get("confirmed_at") or entry.get("timestamp") or "?"
+            lines.append(
+                f"- [{i}] {entry.get('item') or ''}: confirmed by {who} at {when}{note}".replace(" :", ":")
+            )
+        else:
+            lines.append(f"- [{i}]: not confirmed{note}")
+    if changed is not None:
+        lines.append(f"{len([i for i in idx if i in changed])} of {len(idx)} item(s) changed.")
+    elif action == "confirm":
+        lines.append("Items that were already confirmed keep their original confirmation.")
+    return "\n".join(lines) + f"\n\n{_pretty(result)}"
+
+
+def _changed_indexes(result: Any) -> set[int] | None:
+    """``changed_indexes`` from a checklist confirm / unconfirm response, or
+    None when the server is older and does not send it."""
+    raw = result.get("changed_indexes") if isinstance(result, dict) else None
+    if not isinstance(raw, list):
+        return None
+    out = set()
+    for v in raw:
+        try:
+            out.add(int(v))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _single_checklist_note(result: Any, index: int, action: str) -> str:
+    changed = _changed_indexes(result)
+    if changed is None or int(index) in changed:
+        return ""
+    state = "confirmed" if action == "confirm" else "unconfirmed"
+    return f" It was already {state}, so nothing changed."
 
 
 @_tool('Confirm Shipper Checklist Item', destructive=True, idempotent=True)
 @_safe
-def confirm_shipper_checklist_item(shipper_id: str, kind: str, index: int, item: str = "") -> str:
+def confirm_shipper_checklist_item(
+    shipper_id: str, kind: str, index: int, item: str = "", totp_code: str | None = None
+) -> str:
     """Confirm (tick) one checklist item on a shipper, recording you as the
     confirmer with the time. Confirming an item that is already confirmed
     keeps the original confirmation. Only confirm what the user has actually
@@ -4051,14 +4597,21 @@ def confirm_shipper_checklist_item(shipper_id: str, kind: str, index: int, item:
 
     Needs write access to the project: Project Admins, Managers and
     Inspectors have it; a Viewer / Field member only if their user type has
-    the Shippers Edit permission."""
-    result = _set_checklist_item(shipper_id, kind, index, item, "confirm")
-    return f"Confirmed {kind} checklist item {index} on shipper {shipper_id}.\n\n{_pretty(result)}"
+    the Shippers Edit permission. For several items use
+    'bulk_confirm_shipper_checklist_items' (one request, one 2FA code).
+
+    If the project requires 2FA for this sign-off, pass the user's current
+    authenticator code as totp_code (ask the user for it; one code per call)."""
+    result = _set_checklist_item(shipper_id, kind, index, item, "confirm", totp_code)
+    note = _single_checklist_note(result, index, "confirm")
+    return f"Confirmed {kind} checklist item {index} on shipper {shipper_id}.{note}\n\n{_pretty(result)}"
 
 
 @_tool('Unconfirm Shipper Checklist Item', destructive=True, idempotent=True)
 @_safe
-def unconfirm_shipper_checklist_item(shipper_id: str, kind: str, index: int, item: str = "") -> str:
+def unconfirm_shipper_checklist_item(
+    shipper_id: str, kind: str, index: int, item: str = "", totp_code: str | None = None
+) -> str:
     """Clear one checklist confirmation on a shipper. When nothing on that list is
     confirmed any more, the shipper follows its type's checklist again.
 
@@ -4074,38 +4627,168 @@ def unconfirm_shipper_checklist_item(shipper_id: str, kind: str, index: int, ite
 
     Needs write access to the project: Project Admins, Managers and
     Inspectors have it; a Viewer / Field member only if their user type has
-    the Shippers Edit permission."""
-    result = _set_checklist_item(shipper_id, kind, index, item, "unconfirm")
-    return f"Cleared {kind} checklist item {index} on shipper {shipper_id}.\n\n{_pretty(result)}"
+    the Shippers Edit permission. For several items use
+    'bulk_unconfirm_shipper_checklist_items' (one request, one 2FA code).
+
+    If the project requires 2FA for this sign-off, pass the user's current
+    authenticator code as totp_code (ask the user for it; one code per call)."""
+    result = _set_checklist_item(shipper_id, kind, index, item, "unconfirm", totp_code)
+    note = _single_checklist_note(result, index, "unconfirm")
+    return f"Cleared {kind} checklist item {index} on shipper {shipper_id}.{note}\n\n{_pretty(result)}"
+
+
+@_tool('Bulk Confirm Shipper Checklist Items', destructive=True, idempotent=True)
+@_safe
+def bulk_confirm_shipper_checklist_items(
+    shipper_id: str, kind: str, indexes: str, expected_items: str = "",
+    totp_code: str | None = None,
+) -> str:
+    """Confirm (tick) several items of ONE checklist on a shipper in one request,
+    recording you as the confirmer, like 'confirm_shipper_checklist_item'. Only
+    confirm what the user has actually checked; confirm the list with them first.
+
+    'kind' is outgoing or receiving. 'indexes' is comma-separated zero-based
+    positions (or a JSON array) in the shipper's outgoing_checklist_items /
+    receiving_checklist_items (see 'get_shipper'). 'expected_items' optionally
+    gives, as a JSON array parallel to 'indexes', the item text you read at each
+    index: if any differs the API refuses the whole request (409
+    checklist_changed). All or nothing: a bad index refuses the whole request.
+    Items already confirmed keep their original confirmation. The result shows
+    each index's confirmation.
+
+    If the project requires 2FA for this sign-off, pass the user's current
+    authenticator code as totp_code (ask the user for it; one code per call).
+    One code covers the whole batch."""
+    return _bulk_checklist(shipper_id, kind, indexes, expected_items, "confirm", totp_code)
+
+
+@_tool('Bulk Unconfirm Shipper Checklist Items', destructive=True, idempotent=True)
+@_safe
+def bulk_unconfirm_shipper_checklist_items(
+    shipper_id: str, kind: str, indexes: str, expected_items: str = "",
+    totp_code: str | None = None,
+) -> str:
+    """Clear several confirmations of ONE checklist on a shipper in one request,
+    like 'unconfirm_shipper_checklist_item'. Only on the user's explicit request.
+
+    'kind', 'indexes' and 'expected_items' work as in
+    'bulk_confirm_shipper_checklist_items'. All or nothing.
+
+    If the project requires 2FA for this sign-off, pass the user's current
+    authenticator code as totp_code (ask the user for it; one code per call).
+    One code covers the whole batch."""
+    return _bulk_checklist(shipper_id, kind, indexes, expected_items, "unconfirm", totp_code)
 
 
 @_tool('Receive Shipper Line Item', destructive=True, idempotent=True)
 @_safe
-def receive_shipper_line_item(shipper_id: str, item_id: str) -> str:
+def receive_shipper_line_item(shipper_id: str, item_id: str, totp_code: str | None = None) -> str:
     """Mark a line item received, recording you and the time (received_by,
     received_at). Receiving again restamps who and when, as in the web app.
     A received line can no longer be edited or removed. Works on locked
     (shipped) shippers. Only receive what the user has actually checked in.
+    For several lines use 'bulk_receive_shipper_line_items' (one request, one
+    2FA code).
 
     Needs write access to the project: Project Admins, Managers and
     Inspectors have it; a Viewer / Field member only if their user type has
-    the Shippers Edit permission."""
+    the Shippers Edit permission.
+
+    If the project requires 2FA for this sign-off, pass the user's current
+    authenticator code as totp_code (ask the user for it; one code per call)."""
     pid = require_project()
-    result = client().post(f"/api/shippers/projects/{pid}/{shipper_id}/line-items/{item_id}/receive/")
+    result = client().post(
+        f"/api/shippers/projects/{pid}/{shipper_id}/line-items/{item_id}/receive/", **_totp(totp_code)
+    )
     return f"Line item {item_id} received.\n\n{_pretty(result)}"
 
 
 @_tool('Unreceive Shipper Line Item', destructive=True, idempotent=True)
 @_safe
-def unreceive_shipper_line_item(shipper_id: str, item_id: str) -> str:
+def unreceive_shipper_line_item(shipper_id: str, item_id: str, totp_code: str | None = None) -> str:
     """Undo receiving a line item (clears received_by and received_at).
 
     Needs write access to the project: Project Admins, Managers and
     Inspectors have it; a Viewer / Field member only if their user type has
-    the Shippers Edit permission."""
+    the Shippers Edit permission.
+
+    If the project requires 2FA for this sign-off, pass the user's current
+    authenticator code as totp_code (ask the user for it; one code per call)."""
     pid = require_project()
-    result = client().post(f"/api/shippers/projects/{pid}/{shipper_id}/line-items/{item_id}/unreceive/")
+    result = client().post(
+        f"/api/shippers/projects/{pid}/{shipper_id}/line-items/{item_id}/unreceive/", **_totp(totp_code)
+    )
     return f"Line item {item_id} is no longer received.\n\n{_pretty(result)}"
+
+
+def _bulk_receive(shipper_id: str, item_ids: Any, action: str, totp_code: str | None) -> str:
+    ids = _bulk_ids("item_ids", item_ids, _BULK_SHIPPER_MAX)
+    pid = require_project()
+    c = client()
+    result = c.post(
+        f"/api/shippers/projects/{pid}/{shipper_id}/line-items/{action}/",
+        json={"items": ids}, **_totp(totp_code),
+    )
+    # X-Changed-Items: the line ids whose received state this request wrote
+    # (absent on an older server; then only the final state is reported).
+    headers = getattr(c, "last_response_headers", None)
+    raw = headers.get("X-Changed-Items") if headers is not None else None
+    changed = None if raw is None else {p.strip().lower() for p in str(raw).split(",") if p.strip()}
+    rows = result if isinstance(result, list) else []
+    by_id = {str(r.get("id")).lower(): r for r in rows if isinstance(r, dict)}
+    verb = "Received" if action == "receive" else "Unreceived"
+    lines = [f"{verb} {len(ids)} line item(s) on shipper {shipper_id} (all or nothing):"]
+    for item_id in ids:
+        row = by_id.get(item_id.lower())
+        if changed is None:
+            note = ""
+        elif item_id.lower() in changed:
+            note = " (changed by this request)"
+        else:
+            note = " (unchanged: already in that state)"
+        if row is None:
+            lines.append(f"- {item_id}: not reported by the API{note}")
+        elif row.get("received_at"):
+            who = row.get("received_by_name") or row.get("received_by") or "?"
+            lines.append(f"- {item_id}: received by {who} at {row.get('received_at')}{note}")
+        else:
+            lines.append(f"- {item_id}: not received{note}")
+    if changed is not None:
+        lines.append(f"{len([i for i in ids if i.lower() in changed])} of {len(ids)} line(s) changed.")
+    return "\n".join(lines) + f"\n\n{_pretty(result)}"
+
+
+@_tool('Bulk Receive Shipper Line Items', destructive=True, idempotent=True)
+@_safe
+def bulk_receive_shipper_line_items(
+    shipper_id: str, item_ids: str, totp_code: str | None = None
+) -> str:
+    """Mark several line items of one shipper received in one request (up to
+    500), with one shared received_at, like 'receive_shipper_line_item'. Only
+    receive what the user has actually checked in; confirm the list with them
+    first. 'item_ids' is comma-separated ids or a JSON array; every id must be a
+    live line of this shipper, else nothing is written (all or nothing). The
+    result shows each line's received state.
+
+    If the project requires 2FA for this sign-off, pass the user's current
+    authenticator code as totp_code (ask the user for it; one code per call).
+    One code covers the whole batch."""
+    return _bulk_receive(shipper_id, item_ids, "receive", totp_code)
+
+
+@_tool('Bulk Unreceive Shipper Line Items', destructive=True, idempotent=True)
+@_safe
+def bulk_unreceive_shipper_line_items(
+    shipper_id: str, item_ids: str, totp_code: str | None = None
+) -> str:
+    """Undo receiving several line items of one shipper in one request (clears
+    received_by / received_at), like 'unreceive_shipper_line_item'. Only on the
+    user's explicit request. All or nothing.
+
+    If the project requires 2FA for this sign-off, pass the user's current
+    authenticator code as totp_code (ask the user for it; one code per call).
+    One code covers the whole batch."""
+    return _bulk_receive(shipper_id, item_ids, "unreceive", totp_code)
 
 
 @_tool('List Shipper Note Categories', read_only=True)

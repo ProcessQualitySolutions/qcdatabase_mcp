@@ -148,6 +148,8 @@ endpoints.
   server MUST treat these as the user's decision: perform them only on explicit
   confirmation and make clear in the result that the user is accountable. Never
   sign off implicitly.
+- **2FA sign-offs.** A project can require a fresh authenticator code for chosen
+  sign-offs; see §3.1.
 - **Controlled-vocabulary "pills."** List items expose a `pseudo_code` token. When
   a field references a controlled list, a server SHOULD write that pill verbatim
   (rather than free text) so the value stays linked to the canonical list entry.
@@ -173,6 +175,59 @@ endpoints.
   search endpoints (§6) rank by meaning. A server SHOULD offer both and choose
   based on whether the user's ask is structured ("open hydro packages") or fuzzy
   ("welds that failed X-ray near line 12").
+
+### 3.1 2FA sign-offs
+
+A project admin can switch on, per project and per action, a requirement for a
+fresh authenticator (TOTP) code. Gated actions: map item complete / accept (per
+map item type), ITP complete / accept, form sign-off and completion (per form
+type), lock unlock / delete (per lock type), shipper outgoing / receiving
+checklist confirmations, receiving, and status changes (including unlock), plus
+any undo, edit or delete that removes one of those sign-offs. The rule applies to
+every channel (browser, OAuth bearer / MCP, API key) and every user, admins
+included. Off by default.
+
+- **Transport.** The code is sent as the `X-TOTP-Code` request header (works for
+  every method and body type) or as a `totp_code` JSON body field. The reference
+  server uses the header and never logs, stores or echoes the code.
+- **Refusal.** Without a valid code the API answers `403` (`429` when rate
+  limited) with
+  `{"code": "signoff_2fa_required", "reason": "missing|invalid|used|not_enrolled|authenticator_too_new|rate_limited", "detail": "…", "keys": […], "actions": […], "enroll_url": …, "usable_at": …}`
+  and writes nothing. A server SHOULD turn this into an instruction to ask the
+  user: `missing` → ask for the current code; `invalid` / `used` → ask for the
+  next code; `not_enrolled` → the user must set up an authenticator at
+  `enroll_url`; `authenticator_too_new` → usable at `usable_at` (a project admin
+  can waive the 24-hour wait); `rate_limited` → wait a few minutes.
+- **One code, one request.** A code is consumed by the request it authorises, so a
+  user can make at most one gated request per 30-second step. A request may sign a
+  batch, and a batch touching a gated key is all-or-nothing. Batch routes:
+  `POST /api/mapping/items/bulk-mark-complete/` and `bulk-mark-accepted/`
+  (`{"items": [...], "undo": false}`, `undo` a JSON boolean, up to 500, items may
+  span drawings of one project; response lists the changed `items`,
+  `skipped: [{"id", "reason"}]` with reasons `not_found`, `permission_denied`,
+  `training_required`, `locked`, `open_reference_requests`, `not_completed`, and
+  `unchanged` ids); `POST /api/packages/projects/{project_id}/itp-line-items/bulk-mark-complete/`
+  and `bulk-mark-accepted/` (same body, `undo` a JSON boolean, up to 500; response
+  lists `items`, `skipped` with reasons and `unchanged`);
+  `POST /api/shippers/projects/{project_id}/{shipper_id}/checklists/{kind}/confirm/`
+  and `unconfirm/` (`{"indexes": [...], "expected_items": [...]}`; the response is
+  the shipper plus `changed_indexes`, the indexes this request actually changed;
+  the single-index routes return it too);
+  `POST …/{shipper_id}/line-items/receive/` and `unreceive/` (`{"items": [...]}`;
+  the body is the list of lines and the `X-Changed-Items` response header lists
+  the line ids whose received state was written); and `POST /api/locks/projects/{project_id}/locks/unlock/` and `…/locks/delete/`
+  (`{"locks": [...]}`, up to 500; response `{"locks": [...], "skipped": [{"id", "reason"}]}`
+  with reasons `not_found`, `already_unlocked`, `permission_denied`,
+  `training_required`).
+  The reference server exposes these as separate `bulk_*` tools and reports each
+  item's outcome (changed, skipped with the reason, unchanged); `changed_indexes`
+  and `X-Changed-Items` are optional, so an older server without them still works.
+- **Policy (normative).** The code MUST come from an authenticator on a device
+  held by the person signing. A person MAY read a code to an assistant acting for
+  them. Hosting authenticator software on an agent's machine or VM, or giving an
+  agent the authenticator secret, is against policy and invalidates the sign-off.
+  Email and SMS codes are not accepted. A server MUST NOT guess, reuse, generate
+  or store a code and MUST NOT ask for the authenticator secret.
 
 ---
 
@@ -281,8 +336,10 @@ complete.
   (`409 shipper_locked` on later edits) until `POST …/{id}/unlock/`. Checklist
   items are confirmed / unconfirmed by position
   (`…/{id}/checklists/{outgoing|receiving}/{index}/confirm/`; send the item text
-  as `item` to get `409 checklist_changed` if the list moved); lines are received
-  (`…/line-items/{id}/receive/`) and get receiving notes; both work on locked
+  as `item` to get `409 checklist_changed` if the list moved), or several at once
+  (`…/checklists/{kind}/confirm/` with `indexes`); lines are received
+  (`…/line-items/{id}/receive/`, or `…/line-items/receive/` with `items` for a
+  batch) and get receiving notes; both work on locked
   shippers. Also the drawing audit, the PDF export, the builder lookups
   (`drawings/search/`, `drawings/{id}/bom/`, `drawings/{id}/map-items/`,
   `non-drawing-suggestions/`), and shipper types and locations (Project Admins).
@@ -382,6 +439,9 @@ These protect the user and their data regardless of how the server is built.
 
 - **Buy-off is the user's.** Complete/accept actions MUST require explicit user
   confirmation and MUST be attributed honestly; never sign off silently (§3).
+  Where a project requires 2FA for a sign-off, the code MUST come from the
+  signer's own authenticator, relayed by the user; never guessed, reused,
+  generated or stored, and the authenticator secret is never requested (§3.1).
 - **Respect tenant & project scope.** A server MUST NOT attempt to cross the
   token's tenant boundary, and SHOULD keep the user's active project explicit so
   actions can't land in the wrong project by accident.
